@@ -3,7 +3,8 @@ package dev.jev.npc.config;
 /** Server-only configuration. Never include this object in logs or model state. */
 public final class NpcConfig {
     public boolean enabled = true;
-    public String apiKey = "";
+    /** Loaded from jev-npc.secret.json. Transient so it is never written into jev-npc.json. */
+    public transient String apiKey = "";
     public String model = "jev-1.13.0";
     public int requestTimeoutMs = 2500;
     public int decisionCooldownTicks = 40;

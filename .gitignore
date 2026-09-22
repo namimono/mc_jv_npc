@@ -8,5 +8,5 @@ work/
 .env
 .env.*
 !.env.example
-config/jev-npc.json
+jev-npc.secret.json
 *.log

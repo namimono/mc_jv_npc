@@ -37,7 +37,7 @@ flowchart TD
 
 **候选项是一项已经绑定参数的动作。** 例如：继续当前工作；跟随主人；攻击指定 UUID 的僵尸；返回已记录的家；在主人发出请求位置的东侧搭 3×3 平台。Jev 只返回候选 ID，应用层取回原本的 ActionPlan，避免凭空生成坐标或把行为与无关目标组合。不能匹配时可说明支持能力或继续当前任务。
 
-接口固定为 `POST https://api.typesafe.ai/v1/systemone`，Bearer 鉴权；请求含 `model`、`state`、`questions.next_action`。问题类型为 `choice`，候选说明放在 `criteria`。消费 `answers.next_action.choice`、`confidence`、返回模型版本和 `usage.input_tokens`。API key 不进入状态、日志、异常正文或 jar。HTTP 不跟随重定向。生产端点不能通过配置改到其他网站。[官网 HTTP 文档](https://docs.typesafe.ai/api)、[函数选择示例](https://docs.typesafe.ai/cookbooks/function_calling)
+接口固定为 `POST https://api.typesafe.ai/v1/systemone`，Bearer 鉴权；请求含 `model`、`state`、`questions.next_action`。问题类型为 `choice`，候选说明放在 `criteria`。消费 `answers.next_action.choice`、`confidence`、返回模型版本和 `usage.input_tokens`。API key 只保存在游戏配置目录的 `jev-npc.secret.json`，不写入可提交的 `jev-npc.json`，也不进入状态、日志、异常正文或 jar。HTTP 不跟随重定向。生产端点不能通过配置改到其他网站。[官网 HTTP 文档](https://docs.typesafe.ai/api)、[函数选择示例](https://docs.typesafe.ai/cookbooks/function_calling)
 
 **事件有重要性与合并窗口。** 定向聊天只接受主人在附近发出的 `/jev ask …` 或 `@小杰 …` / `@jev …`，普通全服聊天不会扇出到所有 NPC。天气只在晴雨雷或昼夜状态切换时形成事件。受击合并为最新摘要；任务结束／失败形成后续事件；低频检查默认 30 秒一次，支持长期安静场景。
 

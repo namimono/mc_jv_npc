@@ -50,7 +50,8 @@ public final class JevNpcMod implements ModInitializer {
             catch (IOException exception) {
                 config = new NpcConfig();
                 config.enabled = false;
-                LOGGER.error("Jev configuration invalid; local skills remain available. Check {}", configPath());
+                LOGGER.error("Jev configuration invalid; local skills remain available. Check {} and {}",
+                    configPath(), ConfigStore.secretPath(configPath()));
             }
         });
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> { if (client != null) client.close(); });
@@ -65,7 +66,8 @@ public final class JevNpcMod implements ModInitializer {
             // Minecraft normally invokes chat on its server executor; explicitly schedule here too.
             sender.server.execute(() -> NpcCommands.nearest(sender).ifPresent(npc -> npc.brain().chat(sender, request)));
         });
-        LOGGER.info("Jev NPC Demo initialized for Fabric 1.21.1. Config: {}", configPath());
+        LOGGER.info("Jev NPC Demo initialized for Fabric 1.21.1. Config: {}; secret: {}",
+            configPath(), ConfigStore.secretPath(configPath()));
     }
 
     public static void reload(MinecraftServer server) throws IOException {

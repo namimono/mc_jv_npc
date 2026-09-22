@@ -13,15 +13,23 @@ cd /Users/wuxiao40/Documents/code/Test/mc_jev_npc
 
 创建一个允许作弊的创造模式测试世界。世界中输入 `/jev spawn`，会在玩家东侧两格生成名为“小杰”的人形 NPC；那个位置需要留空。NPC 首次生成时自带铁剑、斧、镐、铁胸甲、32 块橡木木板和 8 块面包，方便验证行为。
 
-**填写 API key。** 开发启动读取 `run/config/jev-npc.json`，文件已经初始化。仅将空字符串替换为 TypeSafe 官网生成的 key，保留 JSON 引号：
+**配置分成两份文件。** 行为参数在 `jev-npc.json`，可以提交和复用。API key 只放在同目录的 `jev-npc.secret.json`，这个文件名被 `.gitignore` 排除。仓库里的可提交默认配置是 `config/jev-npc.json`；密钥示例是 `config/jev-npc.secret.example.json`，其中 `apiKey` 为空。
+
+开发时游戏读取的是另一份实例配置：`run/config/jev-npc.json` 和 `run/config/jev-npc.secret.json`。首次缺少文件时，模组会按仓库默认值创建它们，并尽量把密钥文件权限设为仅本人可读写。若要把仓库里改过的行为参数用于当前开发实例，只复制 `jev-npc.json`，不要覆盖已有的 `jev-npc.secret.json`。
+
+**填写 API key。** 编辑 `run/config/jev-npc.secret.json`，保留 JSON 引号：
 
 ```json
-"apiKey": "你的官网 API key"
+{
+  "apiKey": "你的官网 API key"
+}
 ```
 
-不要把 key 提交到仓库或发到聊天。此文件被 `.gitignore` 排除。模型默认固定 `jev-1.13.0`；端点固定为 `https://api.typesafe.ai/v1/systemone`。也可以使用环境变量 `TYPESAFE_API_KEY`，它优先于配置文件。修改后游戏内输入 `/jev reload`，输出只显示 key 是否已配置。
+不要把 key 提交到仓库或发到聊天。模型默认固定 `jev-1.13.0`；端点固定为 `https://api.typesafe.ai/v1/systemone`。也可以使用环境变量 `TYPESAFE_API_KEY`，它优先于密钥文件。修改后游戏内输入 `/jev reload`，输出只显示 key 是否已配置。
 
-用普通启动器安装 jar 时，配置位于该游戏实例的 `config/jev-npc.json`，与项目 `run/config/jev-npc.json` 是两份不同文件。专用服务器则读取服务器工作目录的 `config/jev-npc.json`。`config/jev-npc.example.json` 只作为可提交的空 key 模板。
+旧版把 `apiKey` 写在 `jev-npc.json` 里。下次加载时，模组会把其中的 key 移入 `jev-npc.secret.json`（该文件已有非空 key 时保留原密钥），并从行为配置中删除 `apiKey`。
+
+用普通启动器安装 jar 时，两份文件都在该游戏实例的 `config/` 下。专用服务器则读取服务器工作目录的 `config/`。它们与仓库里的 `config/jev-npc.json` 是不同文件。
 
 **先测试本地技能，无需 key。**
 

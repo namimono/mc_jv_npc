@@ -38,7 +38,7 @@ public final class NpcCommands {
             .then(literal("ask").then(argument("message", StringArgumentType.greedyString()).executes(context -> {
                 var player = context.getSource().getPlayerOrException();
                 require(player).brain().chat(player, StringArgumentType.getString(context, "message"));
-                if (JevNpcMod.config().effectiveKey().isBlank()) player.sendSystemMessage(Component.literal("尚未配置 API key。填写 config/jev-npc.json 后 /jev reload；本地测试用 /jev do。"));
+                if (JevNpcMod.config().effectiveKey().isBlank()) player.sendSystemMessage(Component.literal("尚未配置 API key。填写 config/jev-npc.secret.json 后 /jev reload；本地测试用 /jev do。"));
                 return 1;
             })))
             .then(literal("do").then(argument("skill", StringArgumentType.word())
