@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "apiKey": "",
+  "model": "jev-1.13.0",
+  "requestTimeoutMs": 2500,
+  "decisionCooldownTicks": 40,
+  "eventDebounceTicks": 8,
+  "idleDecisionTicks": 600,
+  "maxResultAgeMs": 4000,
+  "maxRequestsPerMinute": 60,
+  "minimumConfidence": 0.35,
+  "allowBlockChanges": true,
+  "debugToOwner": true
+}

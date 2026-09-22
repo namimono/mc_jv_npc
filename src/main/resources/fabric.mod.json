@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "jev_npc",
+  "version": "${version}",
+  "name": "Jev NPC Demo",
+  "description": "Event-driven companions with local skills and TypeSafe Jev decisions.",
+  "authors": ["mc_jev_npc contributors"],
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.jev.npc.JevNpcMod"],
+    "client": ["dev.jev.npc.client.JevNpcClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

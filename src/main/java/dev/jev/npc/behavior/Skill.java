@@ -1,0 +1,6 @@
+package dev.jev.npc.behavior;
+
+public enum Skill {
+    WAIT, FOLLOW, MOVE, GUARD, ATTACK, FLEE, HARVEST, MINE, BUILD, EQUIP, EAT,
+    SPEAK, CONTINUE, RESUME
+}

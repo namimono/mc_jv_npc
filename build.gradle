@@ -1,0 +1,58 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+base { archivesName = 'jev-npc' }
+
+repositories { mavenCentral() }
+
+loom {
+    splitEnvironmentSourceSets()
+    mods {
+        jev_npc {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+    runs {
+        client {
+            programArg '--username'
+            programArg 'NpcTester'
+        }
+    }
+}
+
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = 'jev_npc_gametest'
+        enableGameTests = true
+        enableClientGameTests = false
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand version: project.version }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+    withSourcesJar()
+}
+test { useJUnitPlatform() }

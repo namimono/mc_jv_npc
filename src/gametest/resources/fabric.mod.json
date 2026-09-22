@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "jev_npc_gametest",
+  "version": "1.0.0",
+  "name": "Jev NPC GameTests",
+  "environment": "server",
+  "entrypoints": {
+    "fabric-gametest": ["dev.jev.npc.NpcGameTests"]
+  },
+  "depends": {"jev_npc": "*", "fabric-gametest-api-v1": "*"}
+}
