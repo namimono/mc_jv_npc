@@ -39,6 +39,9 @@ public final class NpcBrain {
     private List<Drives.Need> needs = List.of();
     private final Conversation conversation = new Conversation();
     private long conversationTurn;
+    /** A failed initiative is not offered again until this tick, so one blocked need cannot loop. */
+    private final Map<String, Long> initiativeCooldowns = new java.util.HashMap<>();
+    private static final Set<String> INITIATIVES = Set.of("stock_blocks", "stock_wood", "rejoin_owner", "wander");
     private String weather;
     private String status = "local / no decision yet";
     private String ownerRequest = "";
@@ -71,6 +74,7 @@ public final class NpcBrain {
     public void stepFinished(ActionPlan plan, boolean success, int progress, String reason, String code) {
         String detail = code.isEmpty() ? reason : reason + " [" + code + "]";
         if (task == null || !plan.id().equals(activeStep)) {
+            if (!success && INITIATIVES.contains(plan.id())) initiativeCooldowns.put(plan.id(), (long) npc.tickCount + 1200);
             event(success ? "task_completed" : "task_failed", detail, true);
             return;
         }
@@ -140,7 +144,7 @@ public final class NpcBrain {
         var server = npc.getServer();
         JevNpcMod.client().interpretReply(config.effectiveKey(), config.model, question.prompt(), question.options(), text, config.requestTimeoutMs)
             .whenComplete((choice, failure) -> server.execute(() -> {
-                if (npc.speech().pending().orElse(null) != question) return;
+                if (!server.isSameThread() || npc.speech().pending().orElse(null) != question) return;
                 if (failure == null && question.options().containsKey(choice)) resolveQuestion(question, choice, "jev");
                 else {
                     resolveQuestion(question, "no", "new_instruction");
@@ -257,7 +261,7 @@ public final class NpcBrain {
         JevNpcMod.LOGGER.info("DeepSeek request npc={} model={} turn={} text=\"{}\"", npc.getUUID(), config.llmModel, turn, oneLine(text));
         JevNpcMod.llm().chat(config.effectiveLlmKey(), config.llmModel, messages, config.llmTimeoutMs)
             .whenComplete((reply, failure) -> server.execute(() -> {
-                if (turn != conversationTurn || npc.isRemoved() || !npc.isAlive()) return;
+                if (!server.isSameThread() || turn != conversationTurn || npc.isRemoved() || !npc.isAlive()) return;
                 if (failure != null) {
                     String code = JevClient.errorCode(failure);
                     JevNpcMod.LOGGER.warn("DeepSeek result npc={} turn={} outcome=failed:{}", npc.getUUID(), turn, code);
@@ -358,7 +362,8 @@ public final class NpcBrain {
             lastAutonomyTick = tick;
         }
         if (!events.ready(tick, config.eventDebounceTicks) || gate.inFlight() || tick < nextDecisionTick) return;
-        if (task == null) needs = Drives.needs(driveState());
+        if (task == null) needs = config.autonomyEnabled ? Drives.needs(driveState()).stream()
+            .filter(need -> initiativeCooldowns.getOrDefault(need.action(), 0L) <= tick).toList() : List.of();
         if (!config.enabled || config.effectiveKey().isBlank()) {
             status = config.enabled ? "NO_KEY: 本地技能模式" : "DISABLED: 本地技能模式";
             Map<String, String> skipped = events.drain();
@@ -392,6 +397,8 @@ public final class NpcBrain {
         var world = npc.level();
         JevNpcMod.client().decide(config.effectiveKey(), config.model, state, candidates, config.requestTimeoutMs)
             .whenComplete((decision, failure) -> server.execute(() -> {
+                // A stopping server runs submitted tasks inline on the HTTP thread; world state must not be touched there.
+                if (!server.isSameThread()) return;
                 boolean valid = gate.complete(ticket, monotonicMs(), config.maxResultAgeMs);
                 if (held) {
                     status = "PAUSED: 手动控制";
@@ -711,7 +718,9 @@ public final class NpcBrain {
         state.add("recent_memory", memories);
         state.addProperty("constraints", "Only the owner can command this NPC. Never attack players. "
             + "Only supplied actions are executable. Building supports one fixed 3x3 oak platform, not arbitrary structures. "
-            + "Long tasks run locally. Weather alone need not interrupt work. Do not repeat a completed owner request.");
+            + "Long tasks run locally. Weather alone need not interrupt work. "
+            + (task != null ? "`task` is the owner's current request, issued just now; an identical earlier request that was "
+                + "completed does not complete this one." : "Do not repeat a completed owner request."));
         return state;
     }
 

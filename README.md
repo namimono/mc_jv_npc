@@ -1,8 +1,8 @@
 # Jev NPC Demo · Fabric 1.21.1
 
-一个使用 TypeSafe 官网 Jev 决策的事件驱动 NPC 模组。Java 21、Minecraft **1.21.1**、Fabric Loader **0.19.5**、Fabric API **0.116.17+1.21.1**。客户端和服务器都需要安装本模组；单人游戏使用集成服务器。
+一个使用 TypeSafe 官网 Jev 决策、可选 DeepSeek 对话的事件驱动 NPC 模组。Java 21、Minecraft **1.21.1**、Fabric Loader **0.19.5**、Fabric API **0.116.17+1.21.1**。客户端和服务器都需要安装本模组；单人游戏使用集成服务器。
 
-方案：[docs/design.md](docs/design.md)。当前决策结构：[docs/decision-architecture.md](docs/decision-architecture.md)。原始调研：[docs/research.md](docs/research.md)。验证和限制：[docs/development-progress.md](docs/development-progress.md)。
+方案：[docs/design.md](docs/design.md)。分层 Agent（寻路、恢复、提问、自主、对话）：[docs/layered-agent.md](docs/layered-agent.md)。当前决策结构：[docs/decision-architecture.md](docs/decision-architecture.md)。原始调研：[docs/research.md](docs/research.md)。验证和限制：[docs/development-progress.md](docs/development-progress.md)。
 
 **开发环境启动。** 本机已有 Homebrew Java 21，脚本会自动选择它：
 
@@ -21,11 +21,14 @@ cd /Users/nakami/Documents/code/mc_jv_npc
 
 ```json
 {
-  "apiKey": "你的官网 API key"
+  "apiKey": "你的官网 API key",
+  "deepseekApiKey": "你的 DeepSeek API key（可选）"
 }
 ```
 
 不要把 key 提交到仓库或发到聊天。模型默认固定 `jev-1.13.0`；端点固定为 `https://api.typesafe.ai/v1/systemone`。也可以使用环境变量 `TYPESAFE_API_KEY`，它优先于密钥文件。修改后游戏内输入 `/jev reload`，输出只显示 key 是否已配置。
+
+`deepseekApiKey` 可以不填。填了以后，主人对 NPC 说的话先交给 DeepSeek（默认模型 `deepseek-flash`，端点固定 `https://api.deepseek.com/chat/completions`），NPC 会在聊天框里回话，需要干活时再转成任务。环境变量 `DEEPSEEK_API_KEY` 优先于文件。旧的密钥文件没有这个字段也能正常加载，需要时手动加一行即可。
 
 旧版把 `apiKey` 写在 `jev-npc.json` 里。下次加载时，模组会把其中的 key 移入 `jev-npc.secret.json`（该文件已有非空 key 时保留原密钥），并从行为配置中删除 `apiKey`。
 
@@ -70,7 +73,15 @@ cd /Users/nakami/Documents/code/mc_jv_npc
 
 **多轮目标执行。** 每条新指令先由 Jev 解释为类型化目标，随后按需选择观察环境、扩大搜索、执行已发现的目标、交付或结束。工具结果会进入下一轮上下文；执行中的工作不会被定时检查替换。新指令立即替换旧目标。默认每个目标最多 16 次模型调用（`maxGoalRounds`）、3600 个活动 tick（`maxGoalTicks`），连续四次无进展失败后停止。采集只交付本次任务入包的物品，不交出初始装备和物资。木头即使被树叶包住也会进入观察结果；采集可清理距目标树干四格内、真正挡住视线的天然树叶（每次采集步骤最多 24 片），不会为此挖石头或破坏玩家放置的树叶。
 
-聊天使用预定义台词：Jev 决定是否打招呼、求助或说明能力，Demo 不生成自由文本，也未接入其他大语言模型。
+**移动会自己想办法。** 所有移动（去某处、跟随、守卫、交付、建造、追击、撤退、走到能砍树的位置）都经过同一个寻路器：会平走、斜走、跳上一格、安全下落（默认不超过 3 格）、游泳、跨 1 格缺口、挖穿挡路的天然方块、原地垫高、搭桥，绕开岩浆和火等危险。默认只挖泥土、石头、沙砾、天然树叶这类天然地形；垫脚只用泥土、圆石、石头等便宜方块，初始的橡木木板留给建造。挖路挖到的方块会进背包，下次就能用来垫脚。
+
+**缺方块会先去挖，拿不准的事会问你。** 路线需要 N 块垫脚方块而背包不够时，NPC 会在聊天框说明，先就近挖 N+2 块泥土或石头再继续；这些方块不算交付给主人的采集物，也不会挖自己脚下或会留下悬空坑洞的方块。路线要在岩浆上方搭路、或要挖穿可能是别人放置的方块（木板、玻璃、圆石等）时，NPC 会用 `<小杰>` 在聊天框提问，等你回答。直接在聊天里回“可以”或“不要”即可，不用加 `@`；听不懂时会交给 Jev 判断，仍不像回答就当作新指令。默认 60 秒没回复：勇敢型对冒险默认同意，其他情况默认不做。
+
+**会主动说话。** 天快黑了、受伤了、背包快满了、工具快坏了、看到裸露的钻石或绿宝石矿时，NPC 会在聊天框提一句，同一话题有冷却，不会刷屏。NPC 刚说过话的 30 秒内，主人在 16 格内的普通聊天也会被当作回复。
+
+**没人下令时会自己找事做。** NPC 会衡量自己的需求：夜里离家远就回家、受伤有面包就吃、主人走远了就过去、垫脚方块少于 16 块就挖一些、原木少于 8 块且附近有树就砍几块、闲太久就在附近走走。性格会影响取舍：谨慎型更看重安全和陪伴，勤快型更爱囤材料，勇敢型更愿意迎敌。配置了 Jev 时由 Jev 结合性格选择；没有 key 时按需求强度在本地选择。自主改动世界只在家附近（默认 24 格）进行，只挖天然地形、只砍天然树木；`autonomyMayModifyWorld=false` 可以关闭。主人一发指令就会抢占自主工作。空闲时 NPC 会看向附近的主人，并捡起身边不是玩家扔出的掉落物。
+
+**聊天。** 没有配置 DeepSeek 时，台词仍是预定义的：Jev 决定是否打招呼、求助或说明能力。配置 DeepSeek 后，NPC 用自然语言回复，回复限制为一行 200 字以内；DeepSeek 给出的任务要么每个字段都是支持的值，要么只作为一句复述交给 Jev 解释，无法越过现有能力。DeepSeek 调用失败时，这句话按原来的指令流程处理。
 
 | 指令 | 用途 |
 | --- | --- |
@@ -95,10 +106,10 @@ cd /Users/nakami/Documents/code/mc_jv_npc
 
 发布 jar 位于 `build/libs/jev-npc-0.1.0.jar`；不要安装 `-sources.jar`。在普通启动器的 Fabric 1.21.1 实例中，将发布 jar 和对应 Fabric API jar 放入 `mods/`。Gradle wrapper 在其他平台可直接使用，但运行 Gradle 的 JDK 也必须是 21。
 
-JUnit 使用本地 HTTP 测试服务器，检查真实请求格式、超时、错误处理、候选校验和事件调度，不会使用你的 key。GameTest 关闭 Jev，验证 Minecraft 世界中的动作与存档行为。两者都不能替代官网模型效果评估。
+JUnit 使用本地 HTTP 测试服务器，检查 Jev 与 DeepSeek 的真实请求格式、超时、错误处理、候选与意图校验和事件调度，不会使用你的 key；寻路规划器、需求打分、发言限频和恢复规则也有不依赖游戏的单元测试。GameTest 关闭 Jev 和 DeepSeek，验证 Minecraft 世界中的动作与存档行为，包括爬台阶、挖出土房间、拒绝挖木板房、跨缺口、搭桥、垫高、绕岩浆、缺方块先挖再搭桥、提问后获准挖穿、自主补充垫脚方块和捡掉落物。两者都不能替代官网模型效果评估。
 
-**重要的 Demo 边界。** 只支持普通地面寻路，不会挖穿地形寻找路线，不会任意设计建筑。自然语言支持明确的一块或四块；未明确数量时采木默认四块、挖掘默认一块，挖掘支持表层泥土类方块及石头／圆石；任意数量、任意方块和装备选择尚未实现。浅水搜索限已加载区域，不会探索远处未知区块。手动修改原始世界应在专用测试存档进行；第三方领地保护兼容、长期生存表现和中文决策准确率待后续验证。NPC 未配置自然生成规则，只能通过指令或实体召唤生成。
+**重要的 Demo 边界。** 寻路不会开门、爬梯子或藤蔓、下潜游泳，也不跨维度；单次搜索限起点 64 格内的已加载区块，太远时先走一段再重新规划。不会任意设计建筑。自然语言支持明确的一块或四块；未明确数量时采木默认四块、挖掘默认一块，挖掘支持表层泥土类方块及石头／圆石；任意数量、任意方块和装备选择尚未实现。浅水搜索限已加载区域，不会探索远处未知区块。手动修改原始世界应在专用测试存档进行；第三方领地保护兼容、长期生存表现和中文决策准确率待后续验证。NPC 未配置自然生成规则，只能通过指令或实体召唤生成。
 
-配置中 `allowBlockChanges=false` 可关闭砍树／挖掘／建造。`debugToOwner` 是兼容旧配置的字段，决策诊断现在始终仅写日志。默认请求超时 2.5 秒、同一 NPC 决策冷却 2 秒、事件合并 0.4 秒、低频检查 30 秒、全服务器每分钟最多 60 次请求。Jev 的 Choice 置信度来自候选概率分布，并不是动作正确性的保证。
+配置中 `allowBlockChanges=false` 可关闭砍树／挖掘／建造，寻路也随之不再挖掘或放置。寻路相关：`navAllowBreak`、`navAllowPlace`（默认都开）、`navMaxFall`（默认 3）、`navMaxNodes` 与 `navNodesPerTick`（单次搜索与每 tick 的节点预算，默认 6000 与 1500）。提问等待 `questionTimeoutTicks`（默认 1200，即 60 秒）。自主行为：`autonomyEnabled`、`autonomyIdleTicks`（空闲评估间隔，默认 200）、`autonomyMayModifyWorld`、`autonomyHomeRadius`（默认 24）。DeepSeek：`llmEnabled`、`llmModel`（默认 `deepseek-flash`，也可填 `deepseek-v4-pro`）、`llmTimeoutMs`（默认 20000）、`llmMaxRequestsPerMinute`（全服默认 20）。`debugToOwner` 是兼容旧配置的字段，决策诊断现在始终仅写日志。默认请求超时 2.5 秒、同一 NPC 决策冷却 2 秒、事件合并 0.4 秒、低频检查 30 秒、全服务器每分钟最多 60 次请求。Jev 的 Choice 置信度来自候选概率分布，并不是动作正确性的保证。
 
 **真实客户端与官网 API 验收。** 配置好 key 后运行 `./scripts/dev.sh runClientValidation`。该任务会调用官网模型，在 `build/client-validation/` 下建立新世界，检查密集树冠中的中文采集并交付、进入浅水，以及带旧失败记忆的“挖地面”，保存 `result.txt` 和四张游戏截图后关闭客户端。密钥优先取 `run/config/jev-npc.secret.json`，不存在时取仓库 `config/` 下的密钥；环境变量仍具有最高优先级。验收模组独立于发布 JAR。结果与本机 Gradle 下载问题的复跑方法见 [客户端验收记录](docs/client-validation.md)。

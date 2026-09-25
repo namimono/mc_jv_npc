@@ -1,6 +1,6 @@
 # NPC 决策架构
 
-更新：2026-09-24。这是当前代码的结构说明，方案边界见 [design.md](design.md)，交付状态见 [development-progress.md](development-progress.md)。
+更新：2026-09-25。这是当前代码的结构说明，方案边界见 [design.md](design.md)，交付状态见 [development-progress.md](development-progress.md)。寻路器、恢复规则、向主人提问、自主需求和 DeepSeek 对话的分层设计见 [layered-agent.md](layered-agent.md)；下图的「SkillRunner」现在把所有移动交给 `navigation/Navigator`，「无事件时的周期检查」之外还有空闲时的自主评估。
 
 **模型只做有限选择，游戏代码拥有世界和执行。** 一次判断可以驱动几十到几百个 tick 的寻路、采集或战斗。危险不等云端，由本地技能立刻处理。
 
@@ -85,4 +85,9 @@ Jev 的返回值只是候选 ID，或那一组意图字段。应用层用 ID 找
 | `ai/EnvironmentTools` | 有界观察，把真实方块和实体绑成候选 |
 | `ai/JevClient` | 官网请求；意图解释与下一步选择分两种问题 |
 | `ai/DecisionGate`、`EventInbox`、`RequestBudget` | 旧结果隔离、事件合并、全服调用预算 |
-| `behavior/ActionPlan`、`Skill`、`SkillRunner` | 已绑定参数的动作，以及寻路、工作和本地避险 |
+| `behavior/ActionPlan`、`Skill`、`SkillRunner` | 已绑定参数的动作，以及工作、恢复子任务、本地避险和空闲小动作 |
+| `behavior/Recovery` | 移动失败时代码自己能处理的规则（缺垫脚方块 → 就近挖） |
+| `navigation/*` | 纯 Java 分片 A* 规划器与反事实失败原因；世界适配器；逐步执行、复核与重规划 |
+| `ai/Communicator` | 统一发言出口：汇报去重、观察限频、单个待答问题、关键词解读答复 |
+| `ai/Drives` | 自主需求打分与性格权重；没有 key 时的本地选择 |
+| `ai/DeepSeekClient`、`ai/Conversation` | DeepSeek JSON 对话、回复清洗、意图校验、滚动对话记忆 |

@@ -3,16 +3,22 @@ package dev.jev.npc.validation;
 import dev.jev.npc.JevNpcMod;
 import dev.jev.npc.command.NpcCommands;
 import dev.jev.npc.entity.JevNpcEntity;
+import dev.jev.npc.navigation.Navigator;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.tutorial.TutorialSteps;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Difficulty;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.GameType;
@@ -23,72 +29,94 @@ import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Isolated real-client acceptance: natural speech -> live Jev -> observations -> actions -> completion. */
+/**
+ * Isolated real-client acceptance for the layered agent, driven by live Jev: a goal that needs building blocks the NPC
+ * must dig first, a route through planks that needs the owner's permission (answered by typing in chat without @),
+ * an idle initiative chosen from the NPC's own needs, and an unprompted nightfall remark.
+ */
 public final class ClientValidation implements ClientModInitializer {
+    private static final String COME_HERE = "走到我现在站的位置";
     private final long started = System.nanoTime();
     private final StringBuilder evidence = new StringBuilder();
+    private final List<String> received = new CopyOnWriteArrayList<>();
     private boolean opening;
-    private volatile boolean finished;
+    private volatile boolean finished, replied;
+    private boolean goalStarted;
     private int stage, ticks, settled;
     private volatile int entityId = -1, capture, captured;
     private volatile String failure;
     private JevNpcEntity npc;
-    private int initialDirt;
 
     @Override public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(this::clientTick);
         ServerTickEvents.END_SERVER_TICK.register(this::serverTick);
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> received.add(message.getString()));
     }
 
     private void clientTick(Minecraft client) {
         if (finished) return;
         try {
             if (failure != null) { finish(client, false, failure); return; }
-            if ((System.nanoTime() - started) / 1_000_000_000 > 300) {
-                finish(client, false, "Global timeout at stage " + stage); return;
-            }
+            if ((System.nanoTime() - started) / 1_000_000_000 > 480) { finish(client, false, "Global timeout at stage " + stage); return; }
             client.options.pauseOnLostFocus = false;
+            client.getTutorial().setStep(TutorialSteps.NONE);
             if (!opening && client.screen != null && client.getOverlay() == null && client.level == null) {
                 opening = true;
                 client.options.renderDistance().set(6);
                 var rules = new GameRules();
                 rules.getRule(GameRules.RULE_DOMOBSPAWNING).set(false, null);
                 rules.getRule(GameRules.RULE_DAYLIGHT).set(false, null);
-                client.createWorldOpenFlows().createFreshLevel("agent-loop-" + System.currentTimeMillis(),
-                    new LevelSettings("Jev agent loop validation", GameType.CREATIVE, false, Difficulty.PEACEFUL, true, rules, WorldDataConfiguration.DEFAULT),
+                client.createWorldOpenFlows().createFreshLevel("layered-agent-" + System.currentTimeMillis(),
+                    new LevelSettings("Jev layered agent validation", GameType.CREATIVE, false, Difficulty.PEACEFUL, true, rules, WorldDataConfiguration.DEFAULT),
                     new WorldOptions(42042L, false, false),
                     registries -> registries.registryOrThrow(Registries.WORLD_PRESET).getHolderOrThrow(WorldPresets.FLAT).value().createWorldDimensions(), client.screen);
             }
-            if (client.level == null || client.player == null || capture == captured) return;
-            if (!(client.level.getEntity(entityId) instanceof JevNpcEntity visible)) return;
-            client.options.hideGui = true;
-            client.player.setYRot(capture >= 3 ? 120 : 175);
-            client.player.setXRot(12);
+            if (client.level == null || client.player == null) return;
+            if (!(client.level.getEntity(entityId) instanceof JevNpcEntity)) return;
+            if (captured == 3 && !replied) {
+                // The owner answers like a player would: plain chat, no @ prefix, through the real chat pipeline.
+                client.player.connection.sendChat("可以，挖吧");
+                replied = true;
+            }
+            if (capture == captured) return;
+            client.options.hideGui = capture < 3;
             if (++settled < 20) return;
-            if (capture == 2 && client.player.getInventory().countItem(Items.SPRUCE_LOG) != 4) return;
-            if (capture == 3 && !visible.isInWater()) return;
+            if (capture == 3 && received.stream().noneMatch(text -> text.contains("可以挖穿吗"))) return;
+            if (capture == 4 && received.stream().noneMatch(text -> text.contains("天快黑了"))) return;
             Screenshot.grab(client.gameDirectory, "stage-" + capture + ".png", client.getMainRenderTarget(), message -> {});
             captured = capture;
             settled = 0;
-            if (capture == 4) finish(client, true, "Client replicated delivered logs and NPC in water; four rendered frames captured.");
+            if (capture == 4) finish(client, true, "Client received the permission question and the nightfall remark; four rendered frames captured.");
         } catch (Throwable error) { finish(client, false, error.getClass().getSimpleName() + ": " + error.getMessage()); }
     }
 
     private void command(MinecraftServer server, ServerPlayer player, String command) {
         server.getCommands().performPrefixedCommand(player.createCommandSourceStack().withPermission(4), command);
     }
-    private void ask(MinecraftServer server, ServerPlayer player, String text) {
-        command(server, player, "jev ask " + text);
-        ticks = 0;
-    }
     private void record(String text) { evidence.append(text).append('\n'); JevNpcMod.LOGGER.info("CLIENT_VALIDATION {}", text); }
     private void require(boolean condition, String message) { if (!condition) throw new IllegalStateException(message); }
+    /** With DeepSeek configured, a goal starts only after the conversation reply arrives. */
     private boolean completed() {
+        if (!goalStarted) {
+            goalStarted = npc.brain().hasGoal();
+            return false;
+        }
         if (npc.brain().hasGoal()) return false;
         var state = npc.brain().taskState();
         require(state.has("outcome") && state.get("outcome").getAsString().equals("completed"), "Goal ended incomplete: " + state);
         return true;
+    }
+    private static void fill(ServerLevel level, int x1, int y1, int z1, int x2, int y2, int z2, net.minecraft.world.level.block.Block block) {
+        for (int x = x1; x <= x2; x++) for (int y = y1; y <= y2; y++) for (int z = z1; z <= z2; z++)
+            level.setBlock(new BlockPos(x, y, z), block.defaultBlockState(), 3);
+    }
+    private static void stand(ServerPlayer player, ServerLevel level, double x, double y, double z, float yaw, float pitch, boolean flying) {
+        player.getAbilities().flying = flying;
+        player.onUpdateAbilities();
+        player.teleportTo(level, x, y, z, yaw, pitch);
     }
 
     private void serverTick(MinecraftServer server) {
@@ -98,86 +126,107 @@ public final class ClientValidation implements ClientModInitializer {
             if (players.isEmpty()) return;
             var player = players.getFirst();
             var level = player.serverLevel();
-            if (++ticks > 2600) throw new IllegalStateException("Stage " + stage + " timed out: " + (npc == null ? "no NPC" : npc.brain().status() + "; " + npc.skills().summary()));
+            if (++ticks > 2600) throw new IllegalStateException("Stage " + stage + " timed out: "
+                + (npc == null ? "no NPC" : npc.brain().status() + "; " + npc.skills().summary() + "; " + npc.brain().taskState()));
             switch (stage) {
                 case 0 -> {
                     if (ticks < 40) return;
                     require(!JevNpcMod.config().effectiveKey().isBlank(), "NO_KEY in isolated instance");
+                    JevNpcMod.config().autonomyEnabled = false;
                     level.setDayTime(6000);
                     level.setWeatherParameters(0, 100000, false, false);
+                    // Two floating islands 10 blocks up with a three-block gap; five dirt blocks on the NPC's island.
+                    fill(level, -3, -51, 0, -1, -51, 4, Blocks.SMOOTH_STONE);
+                    fill(level, -3, -50, 0, -3, -50, 4, Blocks.DIRT);
+                    fill(level, 3, -51, 0, 6, -51, 4, Blocks.SMOOTH_STONE);
                     player.teleportTo(0.5, -60, 0.5);
                     command(server, player, "jev spawn diligent");
                     npc = NpcCommands.nearest(player).orElseThrow();
                     command(server, player, "jev stop");
-                    npc.moveTo(0.5, -60, 0.5, 0, 0);
+                    npc.moveTo(-1.5, -50, 2.5, 0, 0);
                     entityId = npc.getId();
-                    // Dense low spruce canopy: every trunk face is covered by leaves or another log.
-                    for (int x = -1; x <= 1; x++) for (int z = 2; z <= 4; z++) for (int y = -60; y <= -56; y++)
-                        level.setBlock(new BlockPos(x, y, z), Blocks.SPRUCE_LEAVES.defaultBlockState(), 3);
-                    for (int y = -60; y <= -57; y++)
-                        level.setBlock(new BlockPos(0, y, 3), Blocks.SPRUCE_LOG.defaultBlockState(), 3);
-                    for (int x = 4; x <= 6; x++) for (int z = 1; z <= 3; z++)
-                        level.setBlock(new BlockPos(x, -61, z), Blocks.WATER.defaultBlockState(), 3);
-                    player.getAbilities().flying = true; player.onUpdateAbilities();
-                    player.teleportTo(level, 1, -60, 9, 175, 12);
+                    require(npc.skills().navigator().carriedBlocks() == 0, "The starter kit must hold no building blocks");
+                    stand(player, level, 1.5, -46, 12.5, 180, 25, true);
                     capture = 1; stage = 1; ticks = 0;
-                    record("Fresh isolated world with four spruce logs entirely enclosed in a dense low canopy, plus shallow water; NPC rendered.");
+                    record("Scene: NPC on a floating island without building blocks, owner island three blocks away, dirt on the NPC's island.");
                 }
                 case 1 -> {
                     if (captured != 1) return;
-                    ask(server, player, "帮我搞点木头可以吗"); stage = 2;
+                    stand(player, level, 5.5, -50, 2.5, 90, 25, false);
+                    stage = 2; ticks = 0;
                 }
                 case 2 -> {
-                    if (!completed()) return;
-                    require(player.getInventory().countItem(Items.SPRUCE_LOG) == 4, "Owner must receive exactly four logs");
-                    require(npc.backpack().countItem(Items.SPRUCE_LOG) == 0, "Task logs must leave backpack");
-                    require(npc.backpack().countItem(Items.OAK_PLANKS) == 32 && npc.backpack().countItem(Items.BREAD) == 8,
-                        "Starter supplies must not be delivered");
-                    var state = npc.brain().taskState();
-                    require(state.get("round").getAsInt() >= 5 && state.toString().contains("observe_nearby")
-                        && state.toString().contains("deliver_collected"), "Must use multiple real decisions and observation/delivery tools");
-                    int leavesRemaining = 0;
-                    for (int x = -1; x <= 1; x++) for (int z = 2; z <= 4; z++) for (int y = -60; y <= -56; y++)
-                        if (level.getBlockState(new BlockPos(x, y, z)).is(Blocks.SPRUCE_LEAVES)) leavesRemaining++;
-                    require(leavesRemaining < 41, "Harvest must clear obstructing leaves rather than mine through them");
-                    record("WOOD leavesRemaining=" + leavesRemaining + "; " + state);
-                    capture = 2; stage = 3; ticks = 0;
+                    if (ticks < 20) return;
+                    command(server, player, "jev ask " + COME_HERE);
+                    goalStarted = false;
+                    stage = 3; ticks = 0;
                 }
                 case 3 -> {
-                    if (captured != 2) return;
-                    player.teleportTo(level, 9, -60, 7, 120, 12);
-                    ask(server, player, "去水里"); stage = 4;
+                    if (!completed()) return;
+                    require(npc.getX() > 3 && npc.getY() > -50.1, "NPC must cross to the owner's island: " + npc.position());
+                    int bridge = 0, mound = 0;
+                    for (int z = 0; z <= 4; z++) {
+                        for (int x = 0; x <= 2; x++) if (level.getBlockState(new BlockPos(x, -51, z)).is(Blocks.DIRT)) bridge++;
+                        if (level.getBlockState(new BlockPos(-3, -50, z)).is(Blocks.DIRT)) mound++;
+                    }
+                    require(bridge >= 3, "Three dirt blocks must bridge the gap, found " + bridge);
+                    require(mound <= 2, "The bridge dirt must come from digging the island's own dirt, mound left " + mound);
+                    record("BRIDGE: bridgeBlocks=" + bridge + " moundLeft=" + mound + " npc=" + npc.blockPosition().toShortString()
+                        + " state=" + npc.brain().taskState());
+                    stand(player, level, 1.5, -46, 12.5, 180, 25, true);
+                    capture = 2; stage = 4; ticks = 0;
                 }
                 case 4 -> {
-                    if (!completed()) return;
-                    // FloatGoal can briefly lift feet above shallow water. Wait for a wet sample, without moving the NPC.
-                    if (!npc.isInWater()) return;
-                    require(level.getFluidState(npc.blockPosition()).is(net.minecraft.tags.FluidTags.WATER)
-                        || level.getFluidState(npc.blockPosition().below()).is(net.minecraft.tags.FluidTags.WATER),
-                        "NPC must be over the water cell, not merely touching it from shore");
-                    require(npc.brain().taskState().toString().contains("observe_nearby"), "Water must be discovered by tool");
-                    record("WATER: " + npc.brain().taskState());
-                    capture = 3; stage = 5; ticks = 0;
+                    if (captured != 2) return;
+                    // A sealed planks room: every way out means breaking blocks that may belong to a player.
+                    fill(level, 19, -61, -1, 21, -58, 1, Blocks.OAK_PLANKS);
+                    fill(level, 20, -60, 0, 20, -59, 0, Blocks.AIR);
+                    npc.moveTo(20.5, -60, 0.5, 0, 0);
+                    stand(player, level, 25.5, -60, 0.5, 90, 10, false);
+                    stage = 5; ticks = 0;
                 }
                 case 5 -> {
-                    if (captured != 3) return;
-                    initialDirt = npc.backpack().countItem(Items.DIRT) + player.getInventory().countItem(Items.DIRT);
-                    // Replay the user's surrounding context: previous failed harvesting requests must not obscure a new dig command.
-                    npc.personality("cautious");
-                    npc.setHealth(29);
-                    for (String memory : new String[]{"Owner said: 帮我搞点木头可以吗", "failed: HARVEST 目标被其他方块遮挡",
-                        "Owner said: 攻击", "Owner said: 给我一些木头", "failed: HARVEST 区域内没有更多可触及的目标，已采集 1 个",
-                        "failed: HARVEST 区域内没有更多可触及的目标，已采集 0 个", "Owner said: 挖地"}) npc.remember(memory);
-                    npc.backpack().addItem(new net.minecraft.world.item.ItemStack(Items.SPRUCE_LOG, 4));
-                    ask(server, player, "挖地面"); stage = 6;
+                    if (ticks < 40) return;
+                    command(server, player, "jev ask 从房子里出来，走到我这儿");
+                    goalStarted = false;
+                    stage = 6; ticks = 0;
                 }
                 case 6 -> {
+                    var question = npc.speech().pending();
+                    if (question.isEmpty()) return;
+                    require(question.get().kind().equals("break_built"), "Expected a break_built question: " + question.get());
+                    require(level.getBlockState(new BlockPos(21, -60, 0)).is(Blocks.OAK_PLANKS), "Nothing may be broken before the owner answers");
+                    record("QUESTION: " + question.get().prompt());
+                    capture = 3; stage = 7; ticks = 0;
+                }
+                case 7 -> {
                     if (!completed()) return;
-                    require(npc.backpack().countItem(Items.DIRT) + player.getInventory().countItem(Items.DIRT) == initialDirt + 1,
-                        "One surface dig must produce one dirt");
-                    record("GROUND: " + npc.brain().taskState());
-                    command(server, player, "jev stop");
-                    capture = 4; stage = 7; ticks = 0;
+                    require(npc.brain().taskState().get("owner_grants").toString().contains("break_built"), "The chat reply must grant permission");
+                    int planks = 0;
+                    for (int y = -61; y <= -58; y++) for (int x = 19; x <= 21; x++) for (int z = -1; z <= 1; z++)
+                        if (level.getBlockState(new BlockPos(x, y, z)).is(Blocks.OAK_PLANKS)) planks++;
+                    require(planks < 34, "The NPC must dig out once allowed; planks left " + planks);
+                    require(npc.distanceTo(player) < 4, "NPC must reach the owner");
+                    record("PERMISSION: planksLeft=" + planks + " state=" + npc.brain().taskState());
+                    stage = 8; ticks = 0;
+                }
+                case 8 -> {
+                    npc.home(npc.blockPosition());
+                    npc.skills().equip(Items.IRON_CHESTPLATE, EquipmentSlot.CHEST);
+                    npc.setHealth(npc.getMaxHealth());
+                    for (int slot = 0; slot < npc.backpack().getContainerSize(); slot++)
+                        if (Navigator.BUILDING_BLOCKS.contains(npc.backpack().getItem(slot).getItem())) npc.backpack().setItem(slot, ItemStack.EMPTY);
+                    stand(player, level, 27.5, -57, 0.5, 90, 30, true);
+                    JevNpcMod.config().autonomyEnabled = true;
+                    record("AUTONOMY setup: idle diligent NPC near home with no building blocks; owner nearby; live Jev decides.");
+                    stage = 9; ticks = 0;
+                }
+                case 9 -> {
+                    if (npc.skills().navigator().carriedBlocks() < 4) return;
+                    record("AUTONOMY: carried building blocks=" + npc.skills().navigator().carriedBlocks() + " decision=" + npc.brain().status()
+                        + " activity=" + npc.skills().summary() + " afterTicks=" + ticks);
+                    level.setDayTime(12100);
+                    capture = 4; stage = 10; ticks = 0;
                 }
                 default -> {}
             }
@@ -188,7 +237,8 @@ public final class ClientValidation implements ClientModInitializer {
         if (finished) return;
         finished = true;
         try {
-            Files.writeString(Path.of(client.gameDirectory.getAbsolutePath(), "result.txt"), (passed ? "PASS\n" : "FAIL\n") + evidence + detail + "\n");
+            Files.writeString(Path.of(client.gameDirectory.getAbsolutePath(), "result.txt"),
+                (passed ? "PASS\n" : "FAIL\n") + evidence + "Chat received by client: " + received + "\n" + detail + "\n");
         } catch (Exception error) { JevNpcMod.LOGGER.error("Cannot write validation result", error); }
         client.stop();
     }

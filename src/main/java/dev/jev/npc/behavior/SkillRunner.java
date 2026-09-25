@@ -58,6 +58,7 @@ public final class SkillRunner {
         int clearedLeaves;
         int leafTicks;
         int settleTicks;
+        int approachFailures;
         BlockPos clearingTarget;
         BlockPos approachTarget;
         BlockPos blockTarget;
@@ -455,6 +456,7 @@ public final class SkillRunner {
             }
             tool.hurtAndBreak(1, npc, EquipmentSlot.MAINHAND);
             active.progress++;
+            active.approachFailures = 0;
         } else { finish(false, "方块破坏失败"); return; }
         active.blockTarget = null;
         active.spots = List.of();
@@ -475,7 +477,13 @@ public final class SkillRunner {
         switch (travel(NavGoal.anyOf(active.spots), policy(), 1)) {
             // Standing on a working spot that still cannot see or reach the block: give up on this block.
             case ARRIVED -> { if (++active.settleTicks > 20) skipWorkBlock(); }
-            case FAILED -> skipWorkBlock();
+            case FAILED -> {
+                NavOutcome failure = navigator.failure();
+                skipWorkBlock();
+                // Several unreachable targets in a row mean the NPC itself is stuck, not the individual blocks.
+                if (++active.approachFailures >= 3)
+                    finish(false, "附近的目标都走不过去：" + describe(failure), failure == null ? "unreachable" : failure.code());
+            }
             case RUNNING -> {}
         }
     }
@@ -716,7 +724,8 @@ public final class SkillRunner {
         active = null;
         lastOutcome = (success ? "completed: " : "failed: ") + skill + " " + reason;
         npc.remember(lastOutcome);
-        npc.tellOwner(reason);
+        // Permission failures become a question that already states the reason.
+        if (!code.startsWith("needs_permission:")) npc.tellOwner(reason);
         npc.brain().stepFinished(finishedPlan, success, progress, reason, code);
         npc.brain().requestHandled();
     }
