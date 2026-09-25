@@ -137,18 +137,17 @@ public final class NpcBrain {
         if (keyword.isPresent()) { resolveQuestion(question, keyword.get(), "keyword"); return; }
         NpcConfig config = JevNpcMod.config();
         if (!config.enabled || config.effectiveKey().isBlank()) {
-            resolveQuestion(question, "no", "new_instruction");
-            startGoal(player, text);
+            continueChat(player, text);
             return;
         }
+        long turn = conversationTurn;
         var server = npc.getServer();
         JevNpcMod.client().interpretReply(config.effectiveKey(), config.model, question.prompt(), question.options(), text, config.requestTimeoutMs)
             .whenComplete((choice, failure) -> server.execute(() -> {
-                if (!server.isSameThread() || npc.speech().pending().orElse(null) != question) return;
+                if (!server.isSameThread() || turn != conversationTurn || npc.speech().pending().orElse(null) != question) return;
                 if (failure == null && question.options().containsKey(choice)) resolveQuestion(question, choice, "jev");
                 else {
-                    resolveQuestion(question, "no", "new_instruction");
-                    startGoal(player, text);
+                    continueChat(player, text);
                 }
             }));
     }
@@ -163,6 +162,7 @@ public final class NpcBrain {
         if (task != null) {
             lastTask = task.state();
             lastTask.addProperty("outcome", success ? "completed" : "incomplete");
+            lastTask.addProperty("detail", message);
             JevNpcMod.LOGGER.info("Jev goal ended id={} rounds={} outcome={} detail={}", task.id, task.rounds,
                 success ? "completed" : "incomplete", message);
         }
@@ -179,9 +179,10 @@ public final class NpcBrain {
 
     public NpcBrain(JevNpcEntity npc) { this.npc = npc; }
     public String status() { return status; }
-    public void invalidate() { gate.invalidate(); }
+    public void invalidate() { gate.invalidate(); conversationTurn++; }
     public void requestHandled() { if (task == null) ownerRequest = ""; }
     public void hold() {
+        conversationTurn++;
         held = true;
         task = null;
         environment = null;
@@ -212,18 +213,24 @@ public final class NpcBrain {
                 npc.getUUID(), player.getName().getString(), chatIgnoreReason(player), oneLine(text));
             return;
         }
+        conversationTurn++;
         if (npc.speech().pending().isPresent()) {
             answer(player, text);
             return;
         }
+        continueChat(player, text);
+    }
+
+    private void continueChat(ServerPlayer player, String text) {
         if (JevNpcMod.config().llmReady()) converse(player, text);
-        else startGoal(player, text, null, true);
+        else startGoal(player, text);
     }
 
     private void startGoal(ServerPlayer player, String text) { startGoal(player, text, null, true); }
 
     /** A known {@code intent} (from conversation) skips Jev's interpretation round. */
-    private void startGoal(ServerPlayer player, String text, GoalIntent intent, boolean acknowledge) {
+    public void startGoal(ServerPlayer player, String text, GoalIntent intent, boolean acknowledge) {
+        conversationTurn++;
         held = false;
         npc.speech().resolve();
         escalated = null;
@@ -252,10 +259,10 @@ public final class NpcBrain {
         NpcConfig config = JevNpcMod.config();
         if (!JevNpcMod.llmBudget().acquire(monotonicMs(), config.llmMaxRequestsPerMinute)) {
             JevNpcMod.LOGGER.info("DeepSeek skipped npc={} reason=local_rate_limit", npc.getUUID());
-            startGoal(player, text);
+            conversationFailed(player, text);
             return;
         }
-        long turn = ++conversationTurn;
+        long turn = conversationTurn;
         var messages = conversation.messages(personalityText(), situation(), text);
         var server = npc.getServer();
         JevNpcMod.LOGGER.info("DeepSeek request npc={} model={} turn={} text=\"{}\"", npc.getUUID(), config.llmModel, turn, oneLine(text));
@@ -266,19 +273,24 @@ public final class NpcBrain {
                     String code = JevClient.errorCode(failure);
                     JevNpcMod.LOGGER.warn("DeepSeek result npc={} turn={} outcome=failed:{}", npc.getUUID(), turn, code);
                     status = "LLM_" + code;
-                    startGoal(player, text);
+                    conversationFailed(player, text);
                     return;
                 }
                 JevNpcMod.LOGGER.info("DeepSeek result npc={} turn={} latencyMs={} promptTokens={} reply=\"{}\" taskRequest=\"{}\" intent={}",
                     npc.getUUID(), turn, reply.elapsedMs(), reply.promptTokens(), oneLine(reply.say()), oneLine(reply.taskRequest()), reply.intent());
-                conversation.record(text, reply.say());
+                conversation.record(text, reply);
                 if (!reply.say().isEmpty()) npc.say(reply.say());
                 if (!reply.hasTask()) {
                     npc.remember("Chatted with owner: " + text);
                     return;
                 }
-                startGoal(player, reply.intent() != null || reply.taskRequest().isEmpty() ? text : reply.taskRequest(), reply.intent(), reply.say().isEmpty());
+                startGoal(player, reply.requestOr(text), reply.intent(), reply.say().isEmpty());
             }));
+    }
+
+    private void conversationFailed(ServerPlayer player, String text) {
+        if (npc.speech().pending().isPresent()) npc.tellOwner("这次没能听明白，你可以再说一次。刚才的问题还在等你答复。");
+        else startGoal(player, text);
     }
 
     private String personalityText() {
@@ -297,6 +309,19 @@ public final class NpcBrain {
         situation.addProperty("weather", weather == null ? "unknown" : weather);
         situation.addProperty("current_activity", npc.skills().summary());
         situation.addProperty("current_goal", task == null ? "none" : task.request + (task.intent == null ? "" : " " + task.intent));
+        situation.add("last_goal", lastTask.deepCopy());
+        npc.speech().pending().ifPresent(question -> {
+            JsonObject pending = new JsonObject();
+            pending.addProperty("kind", question.kind());
+            pending.addProperty("prompt", question.prompt());
+            JsonObject options = new JsonObject();
+            question.options().forEach(options::addProperty);
+            pending.add("options", options);
+            situation.add("pending_question", pending);
+        });
+        JsonArray recent = new JsonArray();
+        npc.speech().recent().forEach(recent::add);
+        situation.add("recent_speech", recent);
         ServerPlayer owner = npc.owner();
         if (owner != null) situation.addProperty("owner_distance_blocks", Math.round(npc.distanceTo(owner)));
         situation.addProperty("home_distance_blocks", Math.round(Math.sqrt(npc.distanceToSqr(Vec3.atCenterOf(npc.home())))));
@@ -496,6 +521,7 @@ public final class NpcBrain {
     }
 
     public void resetAfterReload() {
+        conversationTurn++;
         gate.invalidate();
         nextDecisionTick = 0;
         event("configuration_reloaded", "Re-evaluate current activity", false);
@@ -602,6 +628,10 @@ public final class NpcBrain {
 
     /** Without Jev, a goal whose intent is already known still advances by a fixed preference over the bound tools. */
     private void chooseToolLocally() {
+        if (task.intent.verb().equals("attack")) {
+            endGoal(false, "没有启用 Jev，我无法可靠判断你指定的是哪个生物，先不攻击。请配置 Jev 后再试。");
+            return;
+        }
         Map<String, ActionPlan> options = options();
         List<ActionPlan> plans = List.copyOf(options.values());
         ActionPlan plan = first(plans, Skill.FINISH)

@@ -19,9 +19,23 @@ public final class Conversation {
         return messages;
     }
 
-    public void record(String ownerText, String reply) {
+    public void record(String ownerText, DeepSeekClient.Reply reply) {
+        JsonObject answer = new JsonObject();
+        answer.addProperty("reply", reply.say());
+        answer.addProperty("action", reply.hasTask() ? "task" : "none");
+        answer.addProperty("task_request", reply.taskRequest());
+        JsonObject intent = null;
+        if (reply.intent() != null) {
+            intent = new JsonObject();
+            intent.addProperty("verb", reply.intent().verb());
+            intent.addProperty("material", reply.intent().material());
+            intent.addProperty("place", reply.intent().place());
+            intent.addProperty("amount", reply.intent().amount());
+            intent.addProperty("deliver_to_owner", reply.intent().deliverToOwner());
+        }
+        answer.add("intent", intent);
         turns.addLast(new Message("user", ownerText));
-        turns.addLast(new Message("assistant", reply));
+        turns.addLast(new Message("assistant", answer.toString()));
         while (turns.size() > MAX_MESSAGES) turns.removeFirst();
     }
 
@@ -35,6 +49,7 @@ public final class Conversation {
             {"reply": "对主人说的话", "action": "none 或 task", "task_request": "action 为 task 时，用一句中文复述要做的任务", "intent": {"verb": "…", "material": "…", "place": "…", "amount": 4, "deliver_to_owner": true}}
             verb 只能是 follow、wait、guard、go_to、harvest、mine、attack、equip、eat、build。material：mine 用 ground 或 stone，harvest 用 log。place：go_to 用 water、home 或 owner。amount 只能是 1 或 4，没说数量就省略。deliver_to_owner 表示采集后是否交给主人。
             只是闲聊或提问时 action 为 none，intent 为 null。主人给出你能做的指令时，就算之前刚做过同样的事，也照做并返回 action 为 task；你看不到的地形和位置由游戏判断，只有指令本身含糊时才反问。
+            pending_question 是尚未答复的授权问题。主人追问原因时解释原因并保持 action 为 none；不要把追问当成授权。recent_speech 是你刚说过的话，last_goal 是上一任务的实际结果，回答时结合这些上下文。
             示例：主人说“帮我砍点木头” → {"reply": "好嘞，我去附近找棵树，砍几块给你。", "action": "task", "task_request": "砍四块原木并交给主人", "intent": {"verb": "harvest", "material": "log", "place": "owner", "amount": 4, "deliver_to_owner": true}}
             """.formatted(personality, situation);
     }

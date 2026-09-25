@@ -29,6 +29,7 @@ public final class DeepSeekClient implements AutoCloseable {
     /** {@code taskRequest} is empty when the owner was only chatting; {@code intent} is null unless fully valid. */
     public record Reply(String say, String taskRequest, GoalIntent intent, int promptTokens, long elapsedMs) {
         public boolean hasTask() { return intent != null || !taskRequest.isEmpty(); }
+        public String requestOr(String ownerText) { return taskRequest.isBlank() ? ownerText : taskRequest; }
     }
 
     private final HttpClient http;

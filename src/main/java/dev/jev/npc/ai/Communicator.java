@@ -1,6 +1,7 @@
 package dev.jev.npc.ai;
 
 import java.util.HashMap;
+import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -28,6 +29,7 @@ public final class Communicator {
         "嗯", "ok", "yes", "sure");
 
     private final Sink sink;
+    private final ArrayDeque<String> recent = new ArrayDeque<>();
     private final Map<String, Long> reports = new HashMap<>();
     private final Map<String, Long> topics = new HashMap<>();
     private long lastRemark = Long.MIN_VALUE / 2;
@@ -41,7 +43,7 @@ public final class Communicator {
         if (last != null && tick - last < REPORT_DEDUP_TICKS) return false;
         reports.put(text, tick);
         if (reports.size() > 32) reports.values().removeIf(sent -> tick - sent >= REPORT_DEDUP_TICKS);
-        sink.send(Channel.REPORT, text);
+        send(Channel.REPORT, text);
         return true;
     }
 
@@ -52,20 +54,29 @@ public final class Communicator {
         topics.put(topic, tick);
         lastRemark = tick;
         lastToOwner = tick;
-        sink.send(Channel.NEARBY, text);
+        send(Channel.NEARBY, text);
         return true;
     }
 
     /** Conversational speech that must not be dropped, e.g. a reply to the owner. */
     public void say(String text, long tick) {
         lastToOwner = tick;
-        sink.send(Channel.NEARBY, text);
+        send(Channel.NEARBY, text);
     }
 
     public void tell(String text, long tick) {
         lastToOwner = tick;
-        sink.send(Channel.TO_OWNER, text);
+        send(Channel.TO_OWNER, text);
     }
+
+    private void send(Channel channel, String text) {
+        sink.send(channel, text);
+        recent.addLast(text);
+        while (recent.size() > 8) recent.removeFirst();
+    }
+
+    /** Only lines actually sent, including observations and permission questions. */
+    public List<String> recent() { return List.copyOf(recent); }
 
     public void ask(Question question, long tick) {
         pending = question;

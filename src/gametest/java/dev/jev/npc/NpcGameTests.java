@@ -262,6 +262,40 @@ public final class NpcGameTests implements FabricGameTest {
         helper.succeed();
     }
 
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
+    public void knownIntentGathersAndDeliversWithoutModels(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        helper.setBlock(3, 1, 3, Blocks.OAK_LOG);
+        helper.setBlock(3, 2, 3, Blocks.OAK_LEAVES);
+        npc.brain().startGoal(fixture.owner(), "采集一块原木并交给我", new GoalIntent("harvest", "log", "owner", 1, true), false);
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.brain().hasGoal(), "local goal must finish");
+            helper.assertTrue(npc.brain().taskState().get("outcome").getAsString().equals("completed"), "local goal must succeed");
+            helper.assertTrue(fixture.owner().getInventory().countItem(Items.OAK_LOG) == 1, "gathered log must reach the owner");
+            helper.assertTrue(npc.backpack().countItem(Items.OAK_PLANKS) == 32, "starter materials must be retained");
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 80)
+    public void localAttackRefusesToGuessAmongNonPlayers(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        var villager = helper.spawn(net.minecraft.world.entity.EntityType.VILLAGER, new BlockPos(2, 1, 3));
+        var golem = helper.spawn(net.minecraft.world.entity.EntityType.IRON_GOLEM, new BlockPos(4, 1, 3));
+        villager.setNoAi(true);
+        golem.setNoAi(true);
+        npc.brain().startGoal(fixture.owner(), "打铁傀儡", new GoalIntent("attack", "log", "owner", 1, false), false);
+        helper.runAfterDelay(40, () -> {
+            helper.assertFalse(npc.brain().hasGoal(), "attack must terminate without a target selector");
+            helper.assertTrue(npc.brain().taskState().get("outcome").getAsString().equals("incomplete"), "refusal must not claim success");
+            helper.assertTrue(villager.getHealth() == villager.getMaxHealth() && golem.getHealth() == golem.getMaxHealth(), "no nearby creature may be attacked");
+            helper.assertTrue(npc.speech().recent().stream().anyMatch(line -> line.contains("无法可靠判断")), "owner must know why attack was refused");
+            npc.brain().hold();
+            helper.succeed();
+        });
+    }
+
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 500)
     public void harvestingReachesTrunkBehindLeaves(GameTestHelper helper) {
         var npc = fixture(helper).npc();

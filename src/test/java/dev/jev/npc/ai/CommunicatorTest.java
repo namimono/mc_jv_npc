@@ -52,4 +52,20 @@ class CommunicatorTest {
         assertEquals(Optional.of("yes"), Communicator.interpret("OK"));
         assertEquals(Optional.empty(), Communicator.interpret("先去砍树"));
     }
+
+    @Test void recentSpeechIncludesOnlySentLinesAndKeepsABoundedSnapshot() {
+        speech.report("开始采集", 0);
+        speech.report("开始采集", 1);
+        speech.remark("night", "天快黑了", 12000, 10);
+        speech.remark("hurt", "我受伤了", 12000, 11);
+        speech.ask(new Communicator.Question("break_built", "可以挖穿吗？", Communicator.yesNo("允许", "拒绝"), "no", 1000), 20);
+        speech.say("因为墙挡住了出口。", 30);
+        var before = speech.recent();
+        assertEquals(List.of("开始采集", "天快黑了", "可以挖穿吗？", "因为墙挡住了出口。"), before);
+        assertTrue(speech.pending().isPresent(), "explaining the question must not resolve it");
+        for (int i = 0; i < 10; i++) speech.tell("后续" + i, 40 + i);
+        assertEquals(8, speech.recent().size());
+        assertEquals("后续2", speech.recent().getFirst());
+        assertEquals(4, before.size(), "snapshot must not change as more speech is sent");
+    }
 }

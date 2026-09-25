@@ -116,11 +116,40 @@ class DeepSeekClientTest {
 
     @Test void conversationKeepsOnlyRecentTurns() {
         var conversation = new Conversation();
-        for (int i = 0; i < 10; i++) conversation.record("问题" + i, "回答" + i);
+        for (int i = 0; i < 10; i++) conversation.record("问题" + i, new DeepSeekClient.Reply("回答" + i, "", null, 0, 0));
         var messages = conversation.messages("谨慎", new JsonObject(), "最新");
         assertEquals(1 + Conversation.MAX_MESSAGES + 1, messages.size());
         assertEquals("问题6", messages.get(1).content());
         assertEquals("最新", messages.getLast().content());
+    }
+
+    @Test void conversationHistoryPreservesJsonActionAndIntent() {
+        var conversation = new Conversation();
+        var reply = new DeepSeekClient.Reply("好，我去打那只铁傀儡。", "攻击附近的铁傀儡",
+            new GoalIntent("attack", "log", "owner", 1, false), 321, 5);
+        conversation.record("好啊", reply);
+        var messages = conversation.messages("谨慎", new JsonObject(), "为什么？");
+        var previous = JsonParser.parseString(messages.get(2).content()).getAsJsonObject();
+        assertEquals("task", previous.get("action").getAsString());
+        assertEquals("攻击附近的铁傀儡", previous.get("task_request").getAsString());
+        assertEquals("attack", previous.getAsJsonObject("intent").get("verb").getAsString());
+        assertFalse(previous.getAsJsonObject("intent").get("deliver_to_owner").getAsBoolean());
+        assertEquals(reply, DeepSeekClient.parse(completion(previous.toString()), 5),
+            "history should use the same schema as model output, except usage metadata");
+    }
+
+    @Test void contextualTaskUsesRestatementEvenWhenIntentIsValid() {
+        var reply = new DeepSeekClient.Reply("我来。", "攻击铁傀儡", new GoalIntent("attack", "log", "owner", 1, false), 0, 0);
+        assertEquals("攻击铁傀儡", reply.requestOr("好啊"));
+        assertEquals("跟着我", new DeepSeekClient.Reply("", "", new GoalIntent("follow", "log", "owner", 1, false), 0, 0).requestOr("跟着我"));
+    }
+
+    @Test void conversationalHistoryExplicitlyKeepsNoAction() {
+        var conversation = new Conversation();
+        conversation.record("为什么？", new DeepSeekClient.Reply("因为路线穿过木板墙。", "", null, 0, 0));
+        var previous = JsonParser.parseString(conversation.messages("谨慎", new JsonObject(), "嗯").get(2).content()).getAsJsonObject();
+        assertEquals("none", previous.get("action").getAsString());
+        assertTrue(previous.get("intent").isJsonNull());
     }
 
     @Test void goalIntentValidationFollowsVerbSpecificFields() {

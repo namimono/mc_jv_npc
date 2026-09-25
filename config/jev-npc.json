@@ -1,6 +1,8 @@
 {
   "enabled": true,
   "model": "jev-1.13.0",
+  "llmEnabled": true,
+  "llmModel": "deepseek-flash",
   "requestTimeoutMs": 2500,
   "decisionCooldownTicks": 40,
   "eventDebounceTicks": 8,
