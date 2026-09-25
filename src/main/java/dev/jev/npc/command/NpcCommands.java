@@ -102,7 +102,8 @@ public final class NpcCommands {
                 try {
                     JevNpcMod.reload(context.getSource().getServer());
                     context.getSource().sendSuccess(() -> Component.literal("Jev 配置已加载；keyConfigured="
-                        + !JevNpcMod.config().effectiveKey().isBlank() + "；model=" + JevNpcMod.config().model), false);
+                        + !JevNpcMod.config().effectiveKey().isBlank() + "；model=" + JevNpcMod.config().model
+                        + "；deepseekReady=" + JevNpcMod.config().llmReady() + "；llmModel=" + JevNpcMod.config().llmModel), false);
                     return 1;
                 } catch (IOException exception) { return fail(context, "配置 JSON 无效，保留原配置。检查引号、逗号和字段类型。"); }
             })));

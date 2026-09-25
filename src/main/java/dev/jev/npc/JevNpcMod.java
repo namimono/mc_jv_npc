@@ -1,5 +1,6 @@
 package dev.jev.npc;
 
+import dev.jev.npc.ai.DeepSeekClient;
 import dev.jev.npc.ai.JevClient;
 import dev.jev.npc.ai.RequestBudget;
 import dev.jev.npc.command.NpcCommands;
@@ -33,11 +34,15 @@ public final class JevNpcMod implements ModInitializer {
             .clientTrackingRange(10).build(ID + ":companion"));
     private static NpcConfig config = new NpcConfig();
     private static JevClient client;
+    private static DeepSeekClient llm;
     private static final RequestBudget BUDGET = new RequestBudget();
+    private static final RequestBudget LLM_BUDGET = new RequestBudget();
 
     public static NpcConfig config() { return config; }
     public static JevClient client() { return client; }
+    public static DeepSeekClient llm() { return llm; }
     public static RequestBudget budget() { return BUDGET; }
+    public static RequestBudget llmBudget() { return LLM_BUDGET; }
     public static Path configPath() { return FabricLoader.getInstance().getConfigDir().resolve("jev-npc.json"); }
 
     @Override public void onInitialize() {
@@ -45,7 +50,9 @@ public final class JevNpcMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, access, environment) -> NpcCommands.register(dispatcher));
         ServerLifecycleEvents.SERVER_STARTING.register(server -> {
             client = new JevClient();
+            llm = new DeepSeekClient();
             BUDGET.clear();
+            LLM_BUDGET.clear();
             try { reload(server); }
             catch (IOException exception) {
                 config = new NpcConfig();
@@ -54,7 +61,10 @@ public final class JevNpcMod implements ModInitializer {
                     configPath(), ConfigStore.secretPath(configPath()));
             }
         });
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> { if (client != null) client.close(); });
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            if (client != null) client.close();
+            if (llm != null) llm.close();
+        });
         ServerEntityEvents.ENTITY_UNLOAD.register((entity, level) -> {
             if (entity instanceof JevNpcEntity npc) npc.brain().invalidate();
         });
@@ -78,7 +88,7 @@ public final class JevNpcMod implements ModInitializer {
         for (var level : server.getAllLevels()) for (var entity : level.getAllEntities()) {
             if (entity instanceof JevNpcEntity npc) npc.brain().resetAfterReload();
         }
-        LOGGER.info("Jev configuration loaded; enabled={}, keyConfigured={}, model={}",
-            config.enabled, !config.effectiveKey().isBlank(), config.model);
+        LOGGER.info("Jev configuration loaded; enabled={}, keyConfigured={}, model={}, deepseekReady={}, llmModel={}",
+            config.enabled, !config.effectiveKey().isBlank(), config.model, config.llmReady(), config.llmModel);
     }
 }

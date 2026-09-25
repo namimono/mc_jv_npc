@@ -27,8 +27,18 @@ public final class NpcConfig {
     public int autonomyIdleTicks = 200;
     public boolean autonomyMayModifyWorld = true;
     public int autonomyHomeRadius = 24;
+    /** Loaded from jev-npc.secret.json ({@code deepseekApiKey}); transient like {@link #apiKey}. */
+    public transient String llmApiKey = "";
+    public boolean llmEnabled = true;
+    public String llmModel = "deepseek-flash";
+    public int llmTimeoutMs = 20000;
+    public int llmMaxRequestsPerMinute = 20;
 
     public void validate() {
+        if (llmApiKey == null) llmApiKey = "";
+        if (llmModel == null || llmModel.isBlank()) llmModel = "deepseek-flash";
+        llmTimeoutMs = Math.clamp(llmTimeoutMs, 2000, 60000);
+        llmMaxRequestsPerMinute = Math.clamp(llmMaxRequestsPerMinute, 1, 120);
         autonomyIdleTicks = Math.clamp(autonomyIdleTicks, 40, 12000);
         autonomyHomeRadius = Math.clamp(autonomyHomeRadius, 4, 128);
         questionTimeoutTicks = Math.clamp(questionTimeoutTicks, 200, 12000);
@@ -53,4 +63,12 @@ public final class NpcConfig {
         String environment = System.getenv("TYPESAFE_API_KEY");
         return environment != null && !environment.isBlank() ? environment.trim() : apiKey.trim();
     }
+
+    public String effectiveLlmKey() {
+        String environment = System.getenv("DEEPSEEK_API_KEY");
+        return environment != null && !environment.isBlank() ? environment.trim() : llmApiKey.trim();
+    }
+
+    /** Owner chat goes to DeepSeek first only when it is enabled and has a key. */
+    public boolean llmReady() { return llmEnabled && !effectiveLlmKey().isBlank(); }
 }

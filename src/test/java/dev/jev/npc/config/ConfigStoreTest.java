@@ -19,8 +19,9 @@ class ConfigStoreTest {
         String secret = Files.readString(directory.resolve("jev-npc.secret.json"));
         assertFalse(settings.contains("apiKey"));
         assertTrue(settings.contains("\"model\": \"jev-1.13.0\""));
-        assertEquals("{\n  \"apiKey\": \"\"\n}\n", secret);
+        assertEquals("{\n  \"apiKey\": \"\",\n  \"deepseekApiKey\": \"\"\n}\n", secret);
         assertTrue(config.apiKey.isBlank());
+        assertTrue(config.llmApiKey.isBlank());
         assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
             Files.getPosixFilePermissions(directory.resolve("jev-npc.secret.json")));
     }
@@ -36,6 +37,21 @@ class ConfigStoreTest {
         assertEquals("local-test-key", config.apiKey);
         assertFalse(config.debugToOwner);
         assertFalse(Files.readString(directory.resolve("jev-npc.json")).contains("local-test-key"));
+    }
+
+    @Test void readsDeepSeekKeyBesideJevKeyAndNeverWritesItToSettings() throws Exception {
+        Files.writeString(directory.resolve("jev-npc.json"), "{\"model\":\"jev-1.13.0\",\"llmModel\":\"deepseek-v4-pro\"}", StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve("jev-npc.secret.json"), "{\"apiKey\":\"jev\",\"deepseekApiKey\":\" ds-test \"}", StandardCharsets.UTF_8);
+        NpcConfig config = ConfigStore.load(directory.resolve("jev-npc.json"));
+        assertEquals("ds-test", config.llmApiKey);
+        assertEquals("deepseek-v4-pro", config.llmModel);
+        Files.writeString(directory.resolve("jev-npc.json"), "{\"apiKey\":\"legacy\"}", StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve("jev-npc.secret.json"), "{\"apiKey\":\"\",\"deepseekApiKey\":\"ds-test\"}", StandardCharsets.UTF_8);
+        NpcConfig migrated = ConfigStore.load(directory.resolve("jev-npc.json"));
+        assertEquals("legacy", migrated.apiKey);
+        assertFalse(Files.readString(directory.resolve("jev-npc.json")).contains("ds-test"));
+        String secret = Files.readString(directory.resolve("jev-npc.secret.json"));
+        assertTrue(secret.contains("legacy") && secret.contains("ds-test"), "migrating the Jev key keeps the DeepSeek key");
     }
 
     @Test void movesLegacyKeyOutOfShareableSettings() throws Exception {

@@ -30,29 +30,35 @@ public final class ConfigStore {
         if (!Files.exists(path)) writeSettings(path, new NpcConfig());
         JsonObject document = readObject(path, "Invalid JSON configuration; check commas, quotes and field types");
         boolean hadLegacyKey = document.has("apiKey");
-        String legacyKey = hadLegacyKey ? stringField(document, "Invalid JSON configuration; apiKey must be a string") : "";
+        String legacyKey = hadLegacyKey ? stringField(document, "apiKey", "Invalid JSON configuration; apiKey must be a string") : "";
         NpcConfig config = GSON.fromJson(document, NpcConfig.class);
         if (config == null) throw new IOException("Configuration must be a JSON object");
-        config.apiKey = loadSecret(secretPath(path), legacyKey);
+        SecretFile secrets = loadSecret(secretPath(path), legacyKey);
+        config.apiKey = secrets.apiKey;
+        config.llmApiKey = secrets.deepseekApiKey;
         config.validate();
         if (hadLegacyKey) writeSettings(path, config);
         return config;
     }
 
-    private static String loadSecret(Path path, String legacyKey) throws IOException {
+    private static SecretFile loadSecret(Path path, String legacyKey) throws IOException {
         String migrated = legacyKey == null ? "" : legacyKey.trim();
+        SecretFile secrets = new SecretFile();
         if (!Files.exists(path)) {
-            writeSecret(path, migrated);
-            return migrated;
+            secrets.apiKey = migrated;
+            writeSecret(path, secrets);
+            return secrets;
         }
         restrictToOwner(path);
-        JsonObject document = readObject(path, "Invalid API key file; check commas, quotes and field types");
-        String stored = stringField(document, "Invalid API key file; apiKey must be a string").trim();
-        if (stored.isBlank() && !migrated.isBlank()) {
-            writeSecret(path, migrated);
-            return migrated;
+        String invalid = "Invalid API key file; check commas, quotes, and that apiKey and deepseekApiKey are strings";
+        JsonObject document = readObject(path, invalid);
+        secrets.apiKey = stringField(document, "apiKey", invalid).trim();
+        secrets.deepseekApiKey = stringField(document, "deepseekApiKey", invalid).trim();
+        if (secrets.apiKey.isBlank() && !migrated.isBlank()) {
+            secrets.apiKey = migrated;
+            writeSecret(path, secrets);
         }
-        return stored;
+        return secrets;
     }
 
     private static JsonObject readObject(Path path, String invalidMessage) throws IOException {
@@ -65,9 +71,9 @@ public final class ConfigStore {
         }
     }
 
-    private static String stringField(JsonObject document, String invalidMessage) throws IOException {
-        if (!document.has("apiKey") || document.get("apiKey").isJsonNull()) return "";
-        var value = document.get("apiKey");
+    private static String stringField(JsonObject document, String field, String invalidMessage) throws IOException {
+        if (!document.has(field) || document.get(field).isJsonNull()) return "";
+        var value = document.get(field);
         if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) throw new IOException(invalidMessage);
         return value.getAsString();
     }
@@ -76,10 +82,8 @@ public final class ConfigStore {
         Files.writeString(path, GSON.toJson(config) + "\n", StandardCharsets.UTF_8);
     }
 
-    private static void writeSecret(Path path, String apiKey) throws IOException {
+    private static void writeSecret(Path path, SecretFile file) throws IOException {
         if (path.getParent() != null) Files.createDirectories(path.getParent());
-        var file = new SecretFile();
-        file.apiKey = apiKey == null ? "" : apiKey.trim();
         Path directory = path.getParent() == null ? Path.of(".") : path.getParent();
         Path temporary = Files.createTempFile(directory, ".jev-npc-secret-", ".tmp");
         try {
@@ -107,6 +111,7 @@ public final class ConfigStore {
 
     private static final class SecretFile {
         String apiKey = "";
+        String deepseekApiKey = "";
     }
 
     private ConfigStore() {}

@@ -24,6 +24,7 @@ import net.minecraft.world.item.Items;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /** Event-driven decision scheduling; all methods except HTTP completion run on the server thread. */
@@ -36,6 +37,8 @@ public final class NpcBrain {
     private long lastAutonomyTick;
     private long idleSince;
     private List<Drives.Need> needs = List.of();
+    private final Conversation conversation = new Conversation();
+    private long conversationTurn;
     private String weather;
     private String status = "local / no decision yet";
     private String ownerRequest = "";
@@ -209,15 +212,20 @@ public final class NpcBrain {
             answer(player, text);
             return;
         }
-        startGoal(player, text);
+        if (JevNpcMod.config().llmReady()) converse(player, text);
+        else startGoal(player, text, null, true);
     }
 
-    private void startGoal(ServerPlayer player, String text) {
+    private void startGoal(ServerPlayer player, String text) { startGoal(player, text, null, true); }
+
+    /** A known {@code intent} (from conversation) skips Jev's interpretation round. */
+    private void startGoal(ServerPlayer player, String text, GoalIntent intent, boolean acknowledge) {
         held = false;
         npc.speech().resolve();
         escalated = null;
         npc.skills().stop();
         task = new AgentTask(text);
+        task.intent = intent;
         environment = new EnvironmentTools(npc);
         activeStep = null;
         events.drain();
@@ -225,10 +233,78 @@ public final class NpcBrain {
         ownerRequest = text;
         requestAnchor = player.blockPosition();
         npc.remember("Owner said: " + ownerRequest);
-        event("owner_chat", ownerRequest, true);
-        JevNpcMod.LOGGER.info("Jev owner message npc={} player={} text=\"{}\"",
-            npc.getUUID(), player.getName().getString(), oneLine(ownerRequest));
-        npc.tellOwner("已收到指令，我会先判断目标，再观察环境并执行。");
+        if (intent == null) event("owner_chat", ownerRequest, true);
+        else event("goal_interpreted", "Intent set from conversation; choose the next tool for the persistent goal", true);
+        JevNpcMod.LOGGER.info("Jev owner message npc={} player={} text=\"{}\" intent={}",
+            npc.getUUID(), player.getName().getString(), oneLine(ownerRequest), intent);
+        if (acknowledge) npc.tellOwner("已收到指令，我会先判断目标，再观察环境并执行。");
+    }
+
+    /**
+     * DeepSeek answers in chat and may hand over a goal. Only the newest message's reply is applied; if the call fails
+     * the message still reaches the Jev command path.
+     */
+    private void converse(ServerPlayer player, String text) {
+        NpcConfig config = JevNpcMod.config();
+        if (!JevNpcMod.llmBudget().acquire(monotonicMs(), config.llmMaxRequestsPerMinute)) {
+            JevNpcMod.LOGGER.info("DeepSeek skipped npc={} reason=local_rate_limit", npc.getUUID());
+            startGoal(player, text);
+            return;
+        }
+        long turn = ++conversationTurn;
+        var messages = conversation.messages(personalityText(), situation(), text);
+        var server = npc.getServer();
+        JevNpcMod.LOGGER.info("DeepSeek request npc={} model={} turn={} text=\"{}\"", npc.getUUID(), config.llmModel, turn, oneLine(text));
+        JevNpcMod.llm().chat(config.effectiveLlmKey(), config.llmModel, messages, config.llmTimeoutMs)
+            .whenComplete((reply, failure) -> server.execute(() -> {
+                if (turn != conversationTurn || npc.isRemoved() || !npc.isAlive()) return;
+                if (failure != null) {
+                    String code = JevClient.errorCode(failure);
+                    JevNpcMod.LOGGER.warn("DeepSeek result npc={} turn={} outcome=failed:{}", npc.getUUID(), turn, code);
+                    status = "LLM_" + code;
+                    startGoal(player, text);
+                    return;
+                }
+                JevNpcMod.LOGGER.info("DeepSeek result npc={} turn={} latencyMs={} promptTokens={} reply=\"{}\" taskRequest=\"{}\" intent={}",
+                    npc.getUUID(), turn, reply.elapsedMs(), reply.promptTokens(), oneLine(reply.say()), oneLine(reply.taskRequest()), reply.intent());
+                conversation.record(text, reply.say());
+                if (!reply.say().isEmpty()) npc.say(reply.say());
+                if (!reply.hasTask()) {
+                    npc.remember("Chatted with owner: " + text);
+                    return;
+                }
+                startGoal(player, reply.intent() != null || reply.taskRequest().isEmpty() ? text : reply.taskRequest(), reply.intent(), reply.say().isEmpty());
+            }));
+    }
+
+    private String personalityText() {
+        return switch (npc.personality()) {
+            case "brave" -> "勇敢，保护主人，愿意和敌对生物战斗，说到做到";
+            case "diligent" -> "勤快，做事有始有终，不喜欢被无故打断，也注意安全";
+            default -> "谨慎友善，看重安全和承诺，打不过时会求助或撤退";
+        };
+    }
+
+    /** What the conversation model may know: observed facts only, no coordinates of other players. */
+    private JsonObject situation() {
+        JsonObject situation = new JsonObject();
+        situation.addProperty("health", Math.round(npc.getHealth()) + "/" + Math.round(npc.getMaxHealth()));
+        situation.addProperty("time", npc.level().isNight() ? "night" : "day");
+        situation.addProperty("weather", weather == null ? "unknown" : weather);
+        situation.addProperty("current_activity", npc.skills().summary());
+        situation.addProperty("current_goal", task == null ? "none" : task.request + (task.intent == null ? "" : " " + task.intent));
+        ServerPlayer owner = npc.owner();
+        if (owner != null) situation.addProperty("owner_distance_blocks", Math.round(npc.distanceTo(owner)));
+        situation.addProperty("home_distance_blocks", Math.round(Math.sqrt(npc.distanceToSqr(Vec3.atCenterOf(npc.home())))));
+        JsonArray backpack = new JsonArray();
+        for (ItemStack stack : npc.backpack().getItems())
+            if (!stack.isEmpty()) backpack.add(stack.getHoverName().getString() + "×" + stack.getCount());
+        situation.add("backpack", backpack);
+        JsonArray memories = new JsonArray();
+        npc.memories().forEach(memories::add);
+        situation.add("recent_memory", memories);
+        situation.add("own_needs", Drives.json(needs, npc.personality()));
+        return situation;
     }
 
     public void tick() {
@@ -289,6 +365,7 @@ public final class NpcBrain {
             JevNpcMod.LOGGER.info("Jev request skipped npc={} reason={} ownerRequest=\"{}\" events=[{}]",
                 npc.getUUID(), status, oneLine(ownerRequest), formatEvents(skipped));
             if (idle && config.autonomyEnabled) chooseLocally();
+            else if (task != null && task.intent != null && activeStep == null && !npc.skills().hasTask()) chooseToolLocally();
             return;
         }
         long nowMs = monotonicMs();
@@ -514,6 +591,26 @@ public final class NpcBrain {
             npc.personality(), mayGather,
             mayGather && npc.skills().findWorkBlock(npc.blockPosition(), "blocks").isPresent(),
             mayGather && npc.skills().findWorkBlock(npc.blockPosition(), "log").isPresent());
+    }
+
+    /** Without Jev, a goal whose intent is already known still advances by a fixed preference over the bound tools. */
+    private void chooseToolLocally() {
+        Map<String, ActionPlan> options = options();
+        List<ActionPlan> plans = List.copyOf(options.values());
+        ActionPlan plan = first(plans, Skill.FINISH)
+            .or(() -> task.intent.gathering() && task.gathered >= task.intent.amount() ? first(plans, Skill.GIVE) : Optional.empty())
+            .or(() -> plans.stream().filter(p -> p.skill() != Skill.OBSERVE && p.skill() != Skill.REPORT && p.skill() != Skill.GIVE).findFirst())
+            .or(() -> first(plans, Skill.OBSERVE))
+            .or(() -> first(plans, Skill.GIVE))
+            .orElse(options.get("cannot_complete"));
+        if (plan == null) return;
+        task.rounds++;
+        JevNpcMod.LOGGER.info("Jev goal local tool goal={} round={} tool={}", task.id, task.rounds, plan.id());
+        applyTool(plan);
+    }
+
+    private static Optional<ActionPlan> first(List<ActionPlan> plans, Skill skill) {
+        return plans.stream().filter(plan -> plan.skill() == skill).findFirst();
     }
 
     /** Without a model the most pressing weighted need wins, so autonomy never depends on a paid call. */

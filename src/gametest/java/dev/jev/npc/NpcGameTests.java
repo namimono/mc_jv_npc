@@ -24,6 +24,7 @@ public final class NpcGameTests implements FabricGameTest {
 
     private Fixture fixture(GameTestHelper helper) {
         JevNpcMod.config().enabled = false; // These tests must never contact a paid API.
+        JevNpcMod.config().llmEnabled = false;
         for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) helper.setBlock(x, 0, z, Blocks.DIRT);
         ServerPlayer owner = helper.makeMockServerPlayerInLevel();
         Vec3 position = helper.absoluteVec(new Vec3(1.5, 1, 1.5));
@@ -402,9 +403,9 @@ public final class NpcGameTests implements FabricGameTest {
     public void idleNpcPicksUpLooseDropsButNotItemsThePlayerThrew(GameTestHelper helper) {
         var fixture = fixture(helper);
         var npc = fixture.npc();
-        Vec3 spot = helper.absoluteVec(new Vec3(3.5, 1, 4.5));
-        var loose = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.FLINT, 3));
-        var thrown = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.EMERALD, 1));
+        Vec3 spot = helper.absoluteVec(new Vec3(2.5, 1, 4.5));
+        var loose = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.FLINT, 3), 0, 0, 0);
+        var thrown = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.EMERALD, 1), 0, 0, 0);
         loose.setNoPickUpDelay();
         thrown.setNoPickUpDelay();
         thrown.setThrower(fixture.owner());
