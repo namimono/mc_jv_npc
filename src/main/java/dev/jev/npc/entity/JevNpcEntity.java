@@ -144,6 +144,7 @@ public final class JevNpcEntity extends PathfinderMob {
                     if (player.distanceToSqr(this) <= 32 * 32) player.sendSystemMessage(Component.literal("<小杰> " + text));
             }
         }
+        brain.trace("speech", "sent", dev.jev.npc.trace.TraceRecorder.data("channel", channel.name(), "text", text));
         JevNpcMod.LOGGER.info("Jev speech npc={} channel={} text=\"{}\"", getUUID(), channel, text);
     }
 

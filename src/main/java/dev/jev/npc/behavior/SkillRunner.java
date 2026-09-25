@@ -1,6 +1,9 @@
 package dev.jev.npc.behavior;
 
 import dev.jev.npc.JevNpcMod;
+import dev.jev.npc.ai.NpcBrain;
+import dev.jev.npc.trace.TraceRecorder.Span;
+import static dev.jev.npc.trace.TraceRecorder.data;
 import dev.jev.npc.config.NpcConfig;
 import dev.jev.npc.entity.JevNpcEntity;
 import dev.jev.npc.navigation.NavGoal;
@@ -52,12 +55,15 @@ public final class SkillRunner {
 
     /** Jev may freeze a step while interpreting a changed request, without discarding its progress. */
     public void pauseForDialogue(boolean paused) {
+        if (paused != dialoguePaused && active != null) active.trace.event(paused ? "paused" : "resumed", data("reason", "dialogue", "progress", active.progress));
         if (paused && !dialoguePaused) { clearCracks(); navigator.stop(); }
         dialoguePaused = paused;
     }
 
     private static final class Task {
         final ActionPlan plan;
+        Span trace = Span.NONE;
+        Navigator.Status navigationStatus;
         int progress;
         int ticks;
         int blockedTicks;
@@ -109,29 +115,36 @@ public final class SkillRunner {
     public String suspendedSummary() { return suspended == null ? "none" : suspended.plan.description(); }
 
     public void start(ActionPlan plan, boolean preserveCurrent) {
-        if (plan.skill() == Skill.CONTINUE) return;
-        if (plan.skill() == Skill.RESUME) { resume(); return; }
-        if (active != null && active.plan.equals(plan)) return;
-        if (plan.skill() == Skill.SPEAK) { speak(plan); return; }
+        Span invocation = npc.brain().executionTrace().child("method", data("action", NpcBrain.actionData(plan), "preserve_current", preserveCurrent));
+        if (plan.skill() == Skill.CONTINUE) { invocation.event("result", data("outcome", "continued")); return; }
+        if (plan.skill() == Skill.RESUME) { resume(); invocation.event("result", data("outcome", "resume_requested")); return; }
+        if (active != null && active.plan.equals(plan)) { invocation.event("result", data("outcome", "already_running")); return; }
+        if (plan.skill() == Skill.SPEAK) { speak(plan); invocation.event("result", data("outcome", "speech_requested")); return; }
         if (plan.skill() == Skill.EQUIP) {
             boolean result = equip(Items.IRON_CHESTPLATE, EquipmentSlot.CHEST);
-            announceInstant(plan, result, result ? "装备了铁胸甲" : "背包里没有铁胸甲");
+            announceInstant(invocation, plan, result, result ? "装备了铁胸甲" : "背包里没有铁胸甲");
             return;
         }
         if (plan.skill() == Skill.EAT) {
             if (npc.backpack().countItem(Items.BREAD) > 0) {
                 npc.backpack().removeItemType(Items.BREAD, 1);
                 npc.heal(6);
-                announceInstant(plan, true, "吃了面包，恢复了 6 点生命值（Demo 规则）");
-            } else announceInstant(plan, false, "没有面包");
+                announceInstant(invocation, plan, true, "吃了面包，恢复了 6 点生命值（Demo 规则）");
+            } else announceInstant(invocation, plan, false, "没有面包");
             return;
         }
         if (preserveCurrent && active != null && active.plan.skill() != Skill.FLEE && active.plan.skill() != Skill.ATTACK) {
+            if (suspended != null) suspended.trace.event("cancelled", data("reason", "replaced suspended action"));
+            active.trace.event("suspended", data("reason", plan.id(), "progress", active.progress));
             suspended = active;
-        } else if (!preserveCurrent) suspended = null;
+        } else {
+            if (active != null) active.trace.event("cancelled", data("reason", "replaced by " + plan.id(), "progress", active.progress));
+            if (!preserveCurrent && suspended != null) { suspended.trace.event("cancelled", data("reason", "new action")); suspended = null; }
+        }
         clearCracks();
         navigator.stop();
         active = new Task(plan);
+        active.trace = invocation;
         lastOutcome = "running";
         npc.tellOwner(switch (plan.skill()) {
             case HARVEST -> "开始采集木头，目标 " + plan.count() + " 块。";
@@ -148,7 +161,8 @@ public final class SkillRunner {
         });
     }
 
-    private void announceInstant(ActionPlan plan, boolean success, String message) {
+    private void announceInstant(Span invocation, ActionPlan plan, boolean success, String message) {
+        invocation.event(success ? "result" : "failed", data("success", success, "detail", message));
         npc.tellOwner(message);
         npc.remember(message);
         npc.brain().stepFinished(plan, success, 0, message);
@@ -156,6 +170,8 @@ public final class SkillRunner {
     }
 
     public void stop() {
+        if (active != null) active.trace.event("cancelled", data("reason", "stop", "progress", active.progress));
+        if (suspended != null) suspended.trace.event("cancelled", data("reason", "stop", "progress", suspended.progress));
         dialoguePaused = false;
         clearCracks();
         active = null;
@@ -181,6 +197,7 @@ public final class SkillRunner {
         clearCracks();
         navigator.stop();
         active = suspended;
+        active.trace.event("resumed", data("progress", active.progress));
         suspended = null;
         active.blockedTicks = 0;
         active.workTicks = 0;
@@ -212,6 +229,7 @@ public final class SkillRunner {
             navigator.stop();
             return;
         }
+        if (JevNpcMod.trace() != null && JevNpcMod.trace().available() && !active.trace.belongsTo(JevNpcMod.trace())) active.trace = npc.brain().executionTrace().child("method", data("action", NpcBrain.actionData(active.plan), "outcome", "loaded_or_recording_enabled", "progress", active.progress));
         active.ticks++;
         if (isWork(active.plan.skill()) && active.ticks > 2400) { finish(false, "任务超时"); return; }
         switch (active.plan.skill()) {
@@ -476,6 +494,7 @@ public final class SkillRunner {
             }
             tool.hurtAndBreak(1, npc, EquipmentSlot.MAINHAND);
             active.progress++;
+            active.trace.event("progress", data("method", "break_block", "block", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(), "position", target.toShortString(), "progress", active.progress, "target_count", active.plan.count()));
             active.approachFailures = 0;
         } else { finish(false, "方块破坏失败"); return; }
         active.blockTarget = null;
@@ -595,6 +614,7 @@ public final class SkillRunner {
                 npc.brain().recordDelivered(entry.getKey(), moved);
                 remaining -= moved;
                 active.progress += moved;
+                active.trace.event("progress", data("method", "deliver", "item", entry.getKey(), "count", moved, "progress", active.progress));
             }
             if (remaining > 0) missing = true;
         }
@@ -628,11 +648,20 @@ public final class SkillRunner {
             npc.backpack().removeItemType(Items.OAK_PLANKS, 1);
             npc.swing(InteractionHand.MAIN_HAND);
             active.progress++;
+            active.trace.event("progress", data("method", "place_block", "position", target.toShortString(), "progress", active.progress));
             active.workTicks = 0;
         } else finish(false, "方块放置失败");
     }
 
-    private Navigator.Status travel(NavGoal goal, NavPolicy policy, double speed) { return navigator.tick(goal, policy, speed); }
+    private Navigator.Status travel(NavGoal goal, NavPolicy policy, double speed) {
+        Navigator.Status status = navigator.tick(goal, policy, speed);
+        if (active != null && status != active.navigationStatus) {
+            active.trace.event("navigation", data("status", status.name(), "goal", goal.toString(), "policy", policy.toString(), "position", npc.blockPosition().toShortString(),
+                "failure", navigator.failure() == null ? null : navigator.failure().code()));
+            active.navigationStatus = status;
+        }
+        return status;
+    }
 
     private NavPolicy policy() {
         NpcConfig config = JevNpcMod.config();
@@ -659,6 +688,7 @@ public final class SkillRunner {
         if (fix.isEmpty()) return false;
         Task child = new Task(fix.get());
         child.parent = active;
+        child.trace = active.trace.child("recovery", data("action", NpcBrain.actionData(fix.get()), "cause", failure.code()));
         child.cause = failure;
         active.recoveries++;
         navigator.stop();
@@ -671,6 +701,7 @@ public final class SkillRunner {
 
     private void endRecovery(boolean enough, String reason) {
         Task child = active;
+        child.trace.event(enough ? "result" : "failed", data("success", enough, "detail", reason, "progress", child.progress));
         clearCracks();
         navigator.stop();
         active = child.parent;
@@ -736,6 +767,7 @@ public final class SkillRunner {
             endRecovery(success || active.progress > 0, reason);
             return;
         }
+        active.trace.event(success ? "result" : "failed", data("success", success, "detail", reason, "code", code, "progress", active.progress, "ticks", active.ticks));
         ActionPlan finishedPlan = active.plan;
         int progress = active.progress;
         String skill = active.plan.skill().name();

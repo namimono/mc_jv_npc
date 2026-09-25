@@ -40,6 +40,63 @@ public final class NpcGameTests implements FabricGameTest {
         return new ActionPlan("test_" + skill, skill, position, null, "", count, "Test " + skill);
     }
 
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)
+    public void traceSpeechUsesCurrentDialogueEvenAfterStop(GameTestHelper helper) {
+        Fixture fixture = fixture(helper);
+        var npc = fixture.npc();
+        npc.brain().startGoal(fixture.owner(), "old goal", new GoalIntent("mine", "stone", "owner", 12, true), false);
+        var call = npc.brain().executionTrace().child("dialogue", new com.google.gson.JsonObject(), "dialogue", 987)
+            .child("jev", dev.jev.npc.trace.TraceRecorder.data("purpose", "REVIEW"));
+        try {
+            var cause = npc.brain().getClass().getDeclaredField("actionCause");
+            cause.setAccessible(true);
+            Object previous = cause.get(npc.brain());
+            cause.set(npc.brain(), call);
+            try {
+                npc.say("trace current dialogue reply");
+                npc.brain().hold();
+                npc.tellOwner("trace current dialogue stopped");
+            } finally { cause.set(npc.brain(), previous); }
+        } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+        helper.succeedWhen(() -> {
+            try {
+                String snapshot = java.nio.file.Files.readString(JevNpcMod.trace().page().resolveSibling("events.jsonl"));
+                var records = snapshot.substring(0, snapshot.lastIndexOf('\n') + 1).lines()
+                    .map(line -> com.google.gson.JsonParser.parseString(line).getAsJsonObject())
+                    .filter(row -> row.get("kind").getAsString().equals("speech") && row.get("phase").getAsString().equals("sent"))
+                    .filter(row -> row.getAsJsonObject("data").get("text").getAsString().startsWith("trace current dialogue"))
+                    .toList();
+                helper.assertTrue(records.size() == 2, "both actual speech lines must be recorded");
+                helper.assertTrue(records.stream().allMatch(row -> row.get("parent").getAsString().equals(call.id())
+                    && row.getAsJsonObject("tags").get("dialogue").getAsInt() == 987), "reply and post-stop speech must retain current Jev decision and dialogue");
+            } catch (java.io.IOException error) { helper.assertTrue(false, "wait for trace flush"); }
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)
+    public void traceRecordsActualMethodResult(GameTestHelper helper) {
+        Fixture fixture = fixture(helper);
+        var npc=fixture.npc();
+        npc.setHealth(15);
+        npc.skills().start(task(Skill.EAT, null, 1), false);
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.getHealth() == 21, "actual method must heal");
+            var recorder=JevNpcMod.trace();
+            helper.assertTrue(recorder != null, "trace recorder must start with server");
+            try {
+                String snapshot=java.nio.file.Files.readString(recorder.page().resolveSibling("events.jsonl"));
+                var rows=snapshot.substring(0, snapshot.lastIndexOf('\n') + 1).lines()
+                    .map(line->com.google.gson.JsonParser.parseString(line).getAsJsonObject())
+                    .filter(row->row.getAsJsonObject("tags").has("npc") && row.getAsJsonObject("tags").get("npc").getAsString().equals(npc.getUUID().toString()))
+                    .filter(row->row.get("kind").getAsString().equals("method")).toList();
+                var started=rows.stream().filter(row->row.get("phase").getAsString().equals("start")).findFirst();
+                helper.assertTrue(started.isPresent(), "method start must be recorded");
+                helper.assertTrue(rows.stream().anyMatch(row->row.get("span").equals(started.get().get("span"))
+                    && row.get("phase").getAsString().equals("result") && row.getAsJsonObject("data").get("success").getAsBoolean()), "same invocation must record real success");
+            } catch (java.io.IOException error) { helper.assertTrue(false, "trace must flush asynchronously"); }
+        });
+    }
+
     @GameTest(template = EMPTY_STRUCTURE)
     public void equipmentFoodAndPersistence(GameTestHelper helper) {
         Fixture fixture = fixture(helper);

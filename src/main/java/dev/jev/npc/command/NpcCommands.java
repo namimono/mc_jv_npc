@@ -65,6 +65,13 @@ public final class NpcCommands {
                 require(context.getSource().getPlayerOrException()).brain().wake();
                 return 1;
             }))
+            .then(literal("trace").executes(context -> {
+                var trace = JevNpcMod.trace();
+                String message = trace == null ? "链路记录未启用；设置 traceEnabled=true 后 /jev reload。"
+                    : "链路页面（服务器本机）：" + trace.page() + (trace.problem().isEmpty() ? "" : "；" + trace.problem());
+                context.getSource().sendSuccess(() -> Component.literal(message), false);
+                return 1;
+            }))
             .then(literal("status").executes(context -> {
                 var npc = require(context.getSource().getPlayerOrException());
                 context.getSource().sendSuccess(() -> Component.literal(npc.status()), false);

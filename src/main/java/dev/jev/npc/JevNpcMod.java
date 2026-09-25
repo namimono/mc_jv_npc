@@ -1,6 +1,7 @@
 package dev.jev.npc;
 
 import dev.jev.npc.ai.DeepSeekClient;
+import dev.jev.npc.trace.TraceRecorder;
 import dev.jev.npc.ai.JevClient;
 import dev.jev.npc.ai.RequestBudget;
 import dev.jev.npc.command.NpcCommands;
@@ -35,6 +36,8 @@ public final class JevNpcMod implements ModInitializer {
     private static NpcConfig config = new NpcConfig();
     private static JevClient client;
     private static DeepSeekClient llm;
+    private static TraceRecorder trace;
+    public static TraceRecorder trace() { return trace; }
     private static final RequestBudget BUDGET = new RequestBudget();
     private static final RequestBudget LLM_BUDGET = new RequestBudget();
 
@@ -65,6 +68,10 @@ public final class JevNpcMod implements ModInitializer {
             if (client != null) client.close();
             if (llm != null) llm.close();
         });
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+            if (trace != null) trace.close();
+            trace = null;
+        });
         ServerEntityEvents.ENTITY_UNLOAD.register((entity, level) -> {
             if (entity instanceof JevNpcEntity npc) npc.brain().invalidate();
         });
@@ -85,6 +92,14 @@ public final class JevNpcMod implements ModInitializer {
     public static void reload(MinecraftServer server) throws IOException {
         NpcConfig replacement = ConfigStore.load(configPath());
         config = replacement;
+        if (!config.traceEnabled && trace != null) { trace.close(); trace = null; }
+        if (config.traceEnabled && trace == null) {
+            try {
+                trace = new TraceRecorder(FabricLoader.getInstance().getGameDir().resolve("logs/jev-traces"), LOGGER::warn);
+                LOGGER.info("NPC decision trace: {}", trace.page());
+            } catch (IOException error) { LOGGER.warn("Unable to start decision trace: {}", error.getClass().getSimpleName()); }
+        }
+        if (trace != null) { trace.secret(config.effectiveKey()); trace.secret(config.effectiveLlmKey()); }
         for (var level : server.getAllLevels()) for (var entity : level.getAllEntities()) {
             if (entity instanceof JevNpcEntity npc) npc.brain().resetAfterReload();
         }

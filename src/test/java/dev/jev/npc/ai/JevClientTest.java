@@ -10,6 +10,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
@@ -127,6 +128,42 @@ class JevClientTest {
         state.add("task", task.state());
         assertEquals(12, JevClient.payload("jev-1.13.0", state, OPTIONS).getAsJsonObject("state")
             .getAsJsonObject("task").getAsJsonArray("tool_results").get(0).getAsJsonObject().get("progress").getAsInt());
+    }
+
+    @Test void diagnosticTracePreservesActualQuestionAllProbabilitiesAndErrorBody(@org.junit.jupiter.api.io.TempDir java.nio.file.Path folder) throws Exception {
+        var body = new AtomicReference<>(VALID);
+        var status = new AtomicInteger(200);
+        var captured = new AtomicReference<JsonObject>();
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/systemone", exchange -> {
+            captured.set(JsonParser.parseString(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject());
+            byte[] bytes = body.get().getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status.get(), bytes.length);
+            exchange.getResponseBody().write(bytes); exchange.close();
+        });
+        server.start(); client=localClient();
+        java.nio.file.Path page;
+        try (var recorder = new dev.jev.npc.trace.TraceRecorder(folder, message -> fail(message))) {
+            page=recorder.page();
+            var trace=recorder.root("jev", new JsonObject(), new JsonObject());
+            client.choose("trace-secret", "jev-1.13.0", new JsonObject(), OPTIONS, "Route the exact current message", 1000, trace).get(3, TimeUnit.SECONDS);
+            status.set(429); body.set("provider rejected trace-secret; Bearer hidden-token");
+            assertThrows(CompletionException.class, () -> client.decide("trace-secret", "jev-1.13.0", new JsonObject(), OPTIONS, 1000,
+                trace.child("jev", new JsonObject())).join());
+        }
+        String text=java.nio.file.Files.readString(page.resolveSibling("events.jsonl"));
+        assertFalse(text.contains("trace-secret")); assertFalse(text.contains("hidden-token"));
+        var rows=text.lines().map(line->JsonParser.parseString(line).getAsJsonObject()).toList();
+        var request=rows.stream().filter(row->row.get("phase").getAsString().equals("request")).findFirst().orElseThrow();
+        assertEquals("Route the exact current message", request.getAsJsonObject("data").getAsJsonObject("input")
+            .getAsJsonObject("questions").getAsJsonObject("next_action").get("instructions").getAsString());
+        var response=rows.stream().filter(row->row.get("phase").getAsString().equals("response")).findFirst().orElseThrow();
+        var answer=response.getAsJsonObject("data").getAsJsonObject("output").getAsJsonObject("answers").getAsJsonObject("next_action");
+        assertEquals(0.91,answer.getAsJsonObject("probabilities").get("follow").getAsDouble());
+        assertEquals(0.09,answer.getAsJsonObject("probabilities").get("continue_current").getAsDouble());
+        assertEquals(0.82,answer.get("confidence").getAsDouble());
+        assertTrue(text.contains("provider rejected [REDACTED]"));
+        assertTrue(text.contains("429"));
     }
 
     private JevClient localClient() { return new JevClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/systemone")); }

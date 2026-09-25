@@ -1,3 +1,13 @@
+# HTML 链路记录验收 · 2026-09-25 19:06
+
+当前分支 `codex/decision-trace-html` 增加旁路诊断记录和本地 HTML。83 项 JUnit、38 项 GameTest、构建、离线 DOM 交互测试和真实记录审计通过。最新真实会话有 604 个事件／200 个 span，包含 56 次 Jev、14 次 DeepSeek 请求；生成发言的父事件与交流均正确。
+
+**区分两项结果：链路审计 PASS，完整真实客户端场景 FAIL。** 最后的黄昏提醒连续低置信度被原有审查门槛拦截；之前的对话、权限、十二块任务及累计八块修订均完成。新功能保留了完整失败输入、选项概率、输出与采用结果，没有修改决策规则来让测试通过。浏览器安全策略禁止工具打开本地 `file://`，实际视觉验收未完成，DOM 测试不是其替代证明。
+
+实现说明、复现命令、两轮真实记录和限制见 [决策链路验收](decision-trace.md)。以下保留此前的 Harness 行为验收历史；`build/client-validation/result.txt` 及截图路径已被最新运行覆盖。
+
+---
+
 # Jev 主导 Harness 最终验收 · 2026-09-25 17:20
 
 **PASS。** 方案先提交为 `1617cdf`，实现位于 `codex/jev-led-harness`。最终执行 `./scripts/dev.sh test build runGameTest runClientValidation --console=plain`，**78 项 JUnit、36 项 GameTest、发布构建和隔离真实客户端全部通过**，耗时 2 分 51 秒。使用真实官网 `jev-1.13.0` 与 `deepseek-flash`，没有模拟客户端验收中的模型结果。独立检查也复跑了离线测试、GameTest 和构建并通过。

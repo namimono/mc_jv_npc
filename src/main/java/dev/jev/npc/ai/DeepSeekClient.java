@@ -1,6 +1,8 @@
 package dev.jev.npc.ai;
 
 import com.google.gson.Gson;
+import dev.jev.npc.trace.TraceRecorder.Span;
+import static dev.jev.npc.trace.TraceRecorder.data;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -54,17 +56,28 @@ public final class DeepSeekClient implements AutoCloseable {
     }
 
     public CompletableFuture<Reply> chat(String key, String model, List<Message> messages, int timeoutMs, DialogueSession.Mode mode) {
+        return chat(key, model, messages, timeoutMs, mode, Span.NONE);
+    }
+
+    public CompletableFuture<Reply> chat(String key, String model, List<Message> messages, int timeoutMs, DialogueSession.Mode mode, Span trace) {
+        trace.secret(key);
+        JsonObject payload = payload(model, messages);
+        trace.event("request", data("input", payload, "mode", mode, "timeout_ms", timeoutMs));
         if (key == null || key.isBlank()) return CompletableFuture.failedFuture(new JevFailure("MISSING_KEY"));
         if (key.chars().anyMatch(character -> character <= 32 || character >= 127))
             return CompletableFuture.failedFuture(new JevFailure("INVALID_KEY_FORMAT"));
         long started = System.nanoTime();
         HttpRequest request = HttpRequest.newBuilder(endpoint).timeout(Duration.ofMillis(timeoutMs))
             .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(payload(model, messages)))).build();
+            .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(payload))).build();
         return http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
             .handle((response, failure) -> {
-                if (failure != null) throw new CompletionException(new JevFailure("NETWORK_OR_TIMEOUT"));
-                // Never log response body or headers: providers may echo inputs.
+                if (failure != null) {
+                    trace.event("error", data("error", "NETWORK_OR_TIMEOUT"));
+                    throw new CompletionException(new JevFailure("NETWORK_OR_TIMEOUT"));
+                }
+                trace.response(response.body(), response.statusCode(), (System.nanoTime() - started) / 1_000_000);
+                // The trace writer redacts credentials; no headers are retained.
                 if (response.statusCode() != 200) throw new CompletionException(new JevFailure("HTTP_" + response.statusCode()));
                 return parse(response.body(), (System.nanoTime() - started) / 1_000_000, mode);
             });

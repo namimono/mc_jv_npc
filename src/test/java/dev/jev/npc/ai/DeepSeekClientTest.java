@@ -74,6 +74,27 @@ class DeepSeekClientTest {
         assertEquals(321, reply.promptTokens());
     }
 
+    @Test void diagnosticTraceKeepsExactMessagesAndUnparsedLanguageOutput(@org.junit.jupiter.api.io.TempDir java.nio.file.Path folder) throws Exception {
+        var sent=new AtomicReference<JsonObject>();
+        String answer=completion("{\"reply\":\"你好 trace-ds-key\",\"goal_change\":\"keep\"}");
+        serve(200, answer, null, sent);
+        java.nio.file.Path page;
+        try(var recorder=new dev.jev.npc.trace.TraceRecorder(folder, message -> fail(message))) {
+            page=recorder.page();
+            client.chat("trace-ds-key", "deepseek-flash", List.of(new DeepSeekClient.Message("system", "exact instructions"),
+                new DeepSeekClient.Message("user", "<script>window.pwned=true</script>你好")), 2000, DialogueSession.Mode.UNDERSTAND_PLAYER,
+                recorder.root("deepseek", new JsonObject(), new JsonObject())).get(3,TimeUnit.SECONDS);
+        }
+        String text=java.nio.file.Files.readString(page.resolveSibling("events.jsonl"));
+        assertFalse(text.contains("trace-ds-key"));
+        var rows=text.lines().map(line->JsonParser.parseString(line).getAsJsonObject()).toList();
+        var request=rows.stream().filter(row->row.get("phase").getAsString().equals("request")).findFirst().orElseThrow();
+        assertEquals(sent.get(),request.getAsJsonObject("data").getAsJsonObject("input"));
+        var response=rows.stream().filter(row->row.get("phase").getAsString().equals("response")).findFirst().orElseThrow();
+        assertEquals(JsonParser.parseString(answer.replace("trace-ds-key", "[REDACTED]")),response.getAsJsonObject("data").get("output"));
+        assertFalse(java.nio.file.Files.readString(page).contains("<script>window.pwned"));
+    }
+
     @Test void chatOnlyRepliesCarryNoGoal() {
         var reply = DeepSeekClient.parse(completion("{\"reply\":\"今天天气不错。\",\"goal_change\":\"keep\"}"), 5);
         assertFalse(reply.hasTask());

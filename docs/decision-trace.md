@@ -30,3 +30,46 @@
 2. 记录器测试并发排序、父子关联、分段／导入、关闭落盘及恶意文本安全；浏览器实际操作搜索、筛选、详情与导出。
 3. GameTest 检查真实方法执行产生关联记录；真实客户端验收生成实际 Jev／DeepSeek／工具链路，查看最终 HTML。
 4. 构建、原有回归及独立复核通过后提交并推送分支。日志及个人运行数据不进 Git。
+
+
+## 实现说明
+
+- 记录器为纯 Java 的 `TraceRecorder`，独立写线程、有界队列；服务器生命周期自动开启／关闭。HTTP 客户端在原有请求路径上旁路记录，不额外调用模型，不修改决策提示词或采用门槛。
+- 请求发起时捕获 span；回调的模型结果、采用判断、发言和权限效果沿用该 span。持续动作另存自身 span，本地恢复为子 span，避免异步聊天与身体执行相互串链。
+- 目标筛选按 span 父链补全前置交流，遇到其他目标边界停止；不能仅凭共享交流 ID 把替换后的新目标执行混入旧目标。
+- HTML 无外部脚本或字体依赖，不发网络请求；每段最多 500 条或约 4 MB，最新分段每秒写一次，页面可每三秒自动刷新。单字符串超过 524288 字符会保留显式截断标记。完整会话保存在 JSONL，可导入页面跨段搜索；追加中的未完成尾行会跳过并提示。
+- `traceEnabled` 默认 `true`；`/jev trace` 返回服务器本机文件位置。远程服务器先下载会话目录。记录不自动删除，磁盘空间由使用者管理。队列溢出在 HTML 中显示丢失数量，JSONL 序号有缺口；写失败会关闭记录并通过日志及 `/jev trace` 报告。
+- 这是执行诊断记录，不是每 tick 的调用栈或模型内部推理。模型输入输出是实际 JSON，经凭据脱敏；缺失候选概率显示“未返回”，不增加额外判断来补数值。
+
+可重复验证命令：
+
+```bash
+./scripts/dev.sh test build runGameTest --console=plain
+# 一次性安装仅用于离线 DOM 测试的开发依赖；不打入模组或 HTML。
+npm install --prefix build/trace-ui-test --no-save --no-audit --no-fund jsdom@26.1.0
+node scripts/test-trace-viewer.cjs /absolute/path/to/session/events.jsonl
+python3 scripts/verify-trace.py /absolute/path/to/session --models
+# 真实客户端与模型调用（需要本地配置的密钥）。
+./scripts/dev.sh runClientValidation --console=plain
+```
+
+`--models` 检查两种模型的请求／响应或明确的传输失败、全部候选概率、代码采用结果，以及实际自然语言发言与 Jev／交流的关联。单纯方法测试的会话不加该参数。
+
+## 验收中的问题与边界
+
+GameTest 首次读取正在写入的 JSONL 尾行时曾解析失败，已改为只读取以换行结束的完整记录，HTML 导入也显式处理未完成尾行。独立复核另发现目标筛选串入后继任务、实际发言归入旧交流的问题；均已修复并增加 DOM／GameTest 回归。
+
+17:45 的第一轮真实客户端完整记录了 602 个事件和 198 个 span，链路审计通过；闲聊、权限、十二块采集交付／治疗／回家和累计八块修订均完成，但最后黄昏发言审查连续三次低置信度，整体客户端验收失败。原始记录和失败报告保留在 `build/trace-first-live-evidence/` 及当时的会话目录。本功能没有更改模型策略来掩盖这次失败。
+
+浏览器工具的 URL 安全策略拒绝打开本地 `file://` 页面，未绕过。已采用不加载网络资源的离线 DOM 测试验证真实记录展示、搜索筛选、父链跳转、候选概率、导入导出、目标替换隔离和恶意文本处理；这不等于完成了真实浏览器的视觉与下载行为验收。
+
+
+## 最终验证 · 2026-09-25 19:06
+
+- `test build runGameTest` 成功：83 项 JUnit、38 项 GameTest，包含实际进食结果落盘，以及当前交流中的发言／停止后通知仍保留原 Jev 父事件。日志：`build/trace-final-offline.log`。
+- DOM 测试通过合成边界样本及真实记录，日志：`build/trace-dom-test.log`。链路审计脚本还用本地手动发言及故意错挂的模型发言做正反检查：允许 `/jev do talk`，拒绝丢失正确 Jev 父事件的生成回复。
+- 最终真实会话：`build/client-validation/logs/jev-traces/2026-09-25T11-02-08.650315Z-4eab2c0e/`；604 个事件、200 个 span、56 次 Jev 请求、14 次 DeepSeek 请求，13 组生成回复的交流 ID 和 Jev 父事件全部正确。一个在服务器退出时被取消的请求有明确错误和丢弃记录，没有虚构输出。`build/trace-integrity-report.json` 为 PASS。
+- 该真实客户端仍在最后的黄昏场景失败：审查选择 `drop_message`，三次 confidence 为 0.08／0.12／0.14，低于原有采用门槛，结果 `failed:UNCERTAIN`。此前的对话、权限、采集交付、途中修订和回家均完成。整轮 `runClientValidation` 是 FAIL，不能将链路审计 PASS 写成所有游戏行为验收通过。日志：`build/trace-final-validation.log`；这是页面可直接排查的真实失败案例。
+- 发布包 `build/libs/jev-npc-0.1.0.jar` 包含记录器和独立 HTML 资源，不包含测试入口或密钥。SHA-256：`56804aa9b024e717f1bdfd4f29e2a533801ff2a10cf9d8abde5e1145f4e8889e`。
+
+真实浏览器视觉验收缺口仍如上；没有把 DOM 测试当作截图或真实浏览器验证。

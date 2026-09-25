@@ -3,6 +3,7 @@ package dev.jev.npc.config;
 /** Server-only configuration. Never include this object in logs or model state. */
 public final class NpcConfig {
     public boolean enabled = true;
+    public boolean traceEnabled = true;
     /** Loaded from jev-npc.secret.json. Transient so it is never written into jev-npc.json. */
     public transient String apiKey = "";
     public String model = "jev-1.13.0";
@@ -69,6 +70,6 @@ public final class NpcConfig {
         return environment != null && !environment.isBlank() ? environment.trim() : llmApiKey.trim();
     }
 
-    /** Owner chat goes to DeepSeek first only when it is enabled and has a key. */
+    /** Whether Jev can offer the DeepSeek dialogue tool. */
     public boolean llmReady() { return llmEnabled && !effectiveLlmKey().isBlank(); }
 }

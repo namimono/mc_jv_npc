@@ -121,3 +121,8 @@ JUnit 使用本地 HTTP 测试服务器，检查 Jev 与 DeepSeek 的真实请�
 配置中 `allowBlockChanges=false` 可关闭砍树／挖掘／建造，寻路也随之不再挖掘或放置。寻路相关：`navAllowBreak`、`navAllowPlace`（默认都开）、`navMaxFall`（默认 3）、`navMaxNodes` 与 `navNodesPerTick`（单次搜索与每 tick 的节点预算，默认 6000 与 1500）。提问等待 `questionTimeoutTicks`（默认 1200，即 60 秒）。自主行为：`autonomyEnabled`、`autonomyIdleTicks`（空闲评估间隔，默认 200）、`autonomyMayModifyWorld`、`autonomyHomeRadius`（默认 24）。DeepSeek：`llmEnabled`、`llmModel`（默认 `deepseek-flash`，也可填 `deepseek-v4-pro`）、`llmTimeoutMs`（默认 20000）、`llmMaxRequestsPerMinute`（全服默认 20）。`debugToOwner` 是兼容旧配置的字段，决策诊断现在始终仅写日志。默认请求超时 2.5 秒、同一 NPC 决策冷却 2 秒、事件合并 0.4 秒、低频检查 30 秒、全服务器每分钟最多 60 次请求。Jev 的 Choice 置信度来自候选概率分布，并不是动作正确性的保证。
 
 **真实客户端与官网 API 验收。** 配置好 key 后运行 `./scripts/dev.sh runClientValidation`。该任务会调用真实 Jev 与 DeepSeek，在 `build/client-validation/` 下建立新世界，检查闲聊不启动任务、缺方块先挖再搭桥、挖木板墙前提问、追问保留授权问题、关闭 Jev 时不绕过门控调用 DeepSeek、聊天同意后挖穿、持续跟随时异步对话、十二块圆石交付后回家的复合目标、采集中用聊天将十二块修订为总共八块、自主补充方块与黄昏事件处理（可选择不发言），保存 `result.txt` 和八张游戏截图后关闭客户端。密钥优先取 `run/config/jev-npc.secret.json`，不存在时取仓库 `config/` 下的密钥；环境变量仍具有最高优先级。验收模组独立于发布 JAR。结果与本机 Gradle 下载问题的复跑方法见 [客户端验收记录](docs/client-validation.md)。
+
+
+**决策链路页面。** 默认开启 `traceEnabled`，进入世界后 `/jev trace` 显示服务器本机的 `logs/jev-traces/<会话>/index.html`，双击即可打开，不需要 Web 服务。页面按 NPC、目标、交流和类型筛选，支持搜索、父子事件跳转、候选概率条、模型完整输入输出、实际采用／拒绝原因及工具进度；关闭“自动刷新”可停留检查。每 500 条或约 4 MB 自动分段，历史页面保留；导入同目录的 `events.jsonl` 可检索整个会话，并导出筛选记录。远程服务器需先下载对应会话目录。
+
+Jev 各选项显示 API 返回的 `probabilities`，整次 Choice 的 `confidence` 单独显示，缺失值不会推算。记录包括玩家聊天和模型上下文，保存在本机；配置的 API key、Authorization 等凭据脱敏，日志不提交 Git。可设置 `traceEnabled=false` 后 `/jev reload` 关闭；磁盘由使用者按需要清理历史会话。记录队列溢出、超大字段截断或磁盘故障有明确提示，功能不阻塞游戏。方案及验收说明见 [链路记录设计](docs/decision-trace.md)。

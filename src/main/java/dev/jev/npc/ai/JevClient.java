@@ -1,6 +1,8 @@
 package dev.jev.npc.ai;
 
 import com.google.gson.Gson;
+import dev.jev.npc.trace.TraceRecorder.Span;
+import static dev.jev.npc.trace.TraceRecorder.data;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.net.URI;
@@ -31,22 +33,35 @@ public final class JevClient implements AutoCloseable {
 
     public CompletableFuture<Decision> decide(String key, String model, JsonObject state,
                                                List<Candidate> candidates, int timeoutMs) {
+        return decide(key, model, state, candidates, timeoutMs, Span.NONE);
+    }
+
+    public CompletableFuture<Decision> decide(String key, String model, JsonObject state,
+                                               List<Candidate> candidates, int timeoutMs, Span trace) {
         long started = System.nanoTime();
-        return send(key, payload(model, state, candidates), timeoutMs)
+        return send(key, payload(model, state, candidates), timeoutMs, trace)
             .thenApply(body -> parse(body, candidates, (System.nanoTime() - started) / 1_000_000));
     }
 
     /** A narrow typed judgment, used for routing and reviewing dialogue; never performs legacy intent interpretation. */
     public CompletableFuture<Decision> choose(String key, String model, JsonObject state, List<Candidate> candidates,
                                               String instructions, int timeoutMs) {
+        return choose(key, model, state, candidates, instructions, timeoutMs, Span.NONE);
+    }
+
+    public CompletableFuture<Decision> choose(String key, String model, JsonObject state, List<Candidate> candidates,
+                                              String instructions, int timeoutMs, Span trace) {
         JsonObject request = payload(model, new JsonObject(), candidates);
         request.add("state", state.deepCopy());
         request.getAsJsonObject("questions").getAsJsonObject("next_action").addProperty("instructions", instructions);
         long started = System.nanoTime();
-        return send(key, request, timeoutMs).thenApply(body -> parse(body, candidates, (System.nanoTime() - started) / 1_000_000));
+        return send(key, request, timeoutMs, trace).thenApply(body -> parse(body, candidates, (System.nanoTime() - started) / 1_000_000));
     }
 
-    private CompletableFuture<String> send(String key, JsonObject payload, int timeoutMs) {
+    private CompletableFuture<String> send(String key, JsonObject payload, int timeoutMs, Span trace) {
+        trace.secret(key);
+        trace.event("request", data("input", payload, "timeout_ms", timeoutMs));
+        long started = System.nanoTime();
         if (key == null || key.isBlank()) return CompletableFuture.failedFuture(new JevFailure("MISSING_KEY"));
         if (key.chars().anyMatch(character -> character <= 32 || character >= 127))
             return CompletableFuture.failedFuture(new JevFailure("INVALID_KEY_FORMAT"));
@@ -55,9 +70,13 @@ public final class JevClient implements AutoCloseable {
             .POST(HttpRequest.BodyPublishers.ofString(GSON.toJson(payload))).build();
         return http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
             .handle((response, failure) -> {
-                if (failure != null) throw new CompletionException(new JevFailure("NETWORK_OR_TIMEOUT"));
+                if (failure != null) {
+                    trace.event("error", data("error", "NETWORK_OR_TIMEOUT"));
+                    throw new CompletionException(new JevFailure("NETWORK_OR_TIMEOUT"));
+                }
+                trace.response(response.body(), response.statusCode(), (System.nanoTime() - started) / 1_000_000);
                 if (response.statusCode() != 200) {
-                    // Never log response body or headers: providers may echo inputs/secrets.
+                    // Trace bodies are redacted asynchronously; headers never enter diagnostics.
                     throw new CompletionException(new JevFailure("HTTP_" + response.statusCode()));
                 }
                 return response.body();
