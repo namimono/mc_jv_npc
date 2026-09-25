@@ -369,6 +369,34 @@ public final class NpcGameTests implements FabricGameTest {
         });
     }
 
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 600)
+    public void npcAsksBeforeBreakingBuiltBlocksAndDigsOnceAllowed(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        for (int x = 0; x <= 2; x++) for (int y = 0; y <= 3; y++) for (int z = 2; z <= 4; z++)
+            if (x != 1 || z != 3 || y == 0 || y == 3) helper.setBlock(x, y, z, Blocks.OAK_PLANKS);
+        AgentTask goal = new AgentTask("出来");
+        goal.intent = new GoalIntent("go_to", "log", "owner", 1, false);
+        CompoundTag brain = new CompoundTag();
+        brain.putString("agentTask", goal.save());
+        brain.putString("activeStep", "test_move");
+        npc.brain().load(brain);
+        BlockPos destination = helper.absolutePos(new BlockPos(5, 1, 3));
+        npc.skills().start(move(destination), false);
+        helper.runAfterDelay(30, () -> {
+            helper.assertTrue(npc.speech().pending().map(q -> q.kind().equals("break_built")).orElse(false),
+                "the NPC must ask before breaking built blocks");
+            helper.assertBlockPresent(Blocks.OAK_PLANKS, new BlockPos(2, 1, 3));
+            npc.brain().chat(fixture.owner(), "可以，挖吧");
+            helper.assertTrue(npc.speech().pending().isEmpty(), "the answer closes the question");
+            helper.assertTrue(npc.brain().grants().contains("break_built"), "permission is granted for this goal");
+        });
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.distanceToSqr(Vec3.atBottomCenterOf(destination)) < 2.5, "must dig out once allowed");
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+        });
+    }
+
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
     public void navigatorJumpsSingleGap(GameTestHelper helper) {
         var npc = fixture(helper).npc();

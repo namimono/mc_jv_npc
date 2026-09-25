@@ -60,11 +60,13 @@ public final class JevNpcMod implements ModInitializer {
         });
         ServerMessageEvents.CHAT_MESSAGE.register((message, sender, params) -> {
             String text = message.signedContent();
-            if (!(text.startsWith("@小杰") || text.startsWith("@jev"))) return;
-            String request = text.substring(text.startsWith("@jev") ? 4 : 3).trim();
+            boolean directed = text.startsWith("@小杰") || text.startsWith("@jev");
+            String request = directed ? text.substring(text.startsWith("@jev") ? 4 : 3).trim() : text.trim();
             if (request.isEmpty()) return;
             // Minecraft normally invokes chat on its server executor; explicitly schedule here too.
-            sender.server.execute(() -> NpcCommands.nearest(sender).ifPresent(npc -> npc.brain().chat(sender, request)));
+            sender.server.execute(() -> NpcCommands.nearest(sender).ifPresent(npc -> {
+                if (directed || npc.brain().expectsReply(sender)) npc.brain().chat(sender, request);
+            }));
         });
         LOGGER.info("Jev NPC Demo initialized for Fabric 1.21.1. Config: {}; secret: {}",
             configPath(), ConfigStore.secretPath(configPath()));

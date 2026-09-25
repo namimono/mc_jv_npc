@@ -22,8 +22,10 @@ public final class NpcConfig {
     public int navMaxFall = 3;
     public int navMaxNodes = 6000;
     public int navNodesPerTick = 1500;
+    public int questionTimeoutTicks = 1200;
 
     public void validate() {
+        questionTimeoutTicks = Math.clamp(questionTimeoutTicks, 200, 12000);
         navMaxFall = Math.clamp(navMaxFall, 1, 8);
         navMaxNodes = Math.clamp(navMaxNodes, 500, 50000);
         navNodesPerTick = Math.clamp(navNodesPerTick, 100, 10000);

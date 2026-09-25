@@ -579,7 +579,8 @@ public final class SkillRunner {
 
     private NavPolicy policy() {
         NpcConfig config = JevNpcMod.config();
-        return new NavPolicy(config.navAllowBreak, config.navAllowPlace, config.navMaxFall, false, false);
+        var grants = npc.brain().grants();
+        return new NavPolicy(config.navAllowBreak, config.navAllowPlace, config.navMaxFall, grants.contains("risk"), grants.contains("break_built"));
     }
 
     private NavPolicy walking() { return NavPolicy.walking(JevNpcMod.config().navMaxFall); }

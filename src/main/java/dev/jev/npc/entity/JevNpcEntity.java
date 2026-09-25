@@ -1,6 +1,7 @@
 package dev.jev.npc.entity;
 
 import dev.jev.npc.JevNpcMod;
+import dev.jev.npc.ai.Communicator;
 import dev.jev.npc.ai.NpcBrain;
 import dev.jev.npc.behavior.SkillRunner;
 import net.minecraft.core.BlockPos;
@@ -37,6 +38,7 @@ public final class JevNpcEntity extends PathfinderMob {
     private final ArrayDeque<String> memories = new ArrayDeque<>();
     private final SkillRunner skills = new SkillRunner(this);
     private final NpcBrain brain = new NpcBrain(this);
+    private final Communicator speech = new Communicator(this::deliver);
 
     public JevNpcEntity(EntityType<? extends PathfinderMob> type, Level level) {
         super(type, level);
@@ -128,15 +130,21 @@ public final class JevNpcEntity extends PathfinderMob {
         while (memories.size() > 8) memories.removeFirst();
     }
 
-    public void tellOwner(String message) {
-        ServerPlayer player = owner();
-        if (player != null) player.sendSystemMessage(Component.literal("[小杰] " + message));
-    }
+    public Communicator speech() { return speech; }
+    public void tellOwner(String message) { speech.report(message, level().getGameTime()); }
+    public void say(String text) { speech.say(text, level().getGameTime()); }
 
-    public void say(String text) {
-        for (ServerPlayer player : serverLevel().players()) {
-            if (player.distanceToSqr(this) <= 32 * 32) player.sendSystemMessage(Component.literal("<小杰> " + text));
+    private void deliver(Communicator.Channel channel, String text) {
+        ServerPlayer owner = owner();
+        switch (channel) {
+            case REPORT -> { if (owner != null) owner.sendSystemMessage(Component.literal("[小杰] " + text)); }
+            case TO_OWNER -> { if (owner != null) owner.sendSystemMessage(Component.literal("<小杰> " + text)); }
+            case NEARBY -> {
+                for (ServerPlayer player : serverLevel().players())
+                    if (player.distanceToSqr(this) <= 32 * 32) player.sendSystemMessage(Component.literal("<小杰> " + text));
+            }
         }
+        JevNpcMod.LOGGER.info("Jev speech npc={} channel={} text=\"{}\"", getUUID(), channel, text);
     }
 
     public String status() {

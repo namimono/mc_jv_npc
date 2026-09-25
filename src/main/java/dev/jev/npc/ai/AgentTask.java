@@ -25,6 +25,8 @@ public final class AgentTask {
     public final Map<String, Integer> collected = new LinkedHashMap<>();
     public final Set<String> failedTargets = new LinkedHashSet<>();
     public final List<JsonObject> history = new ArrayList<>();
+    /** Permissions the owner granted for this goal only: {@code risk}, {@code break_built}. */
+    public Set<String> grants = new LinkedHashSet<>();
 
     public AgentTask(String request) {
         this.id = java.util.UUID.randomUUID().toString();
@@ -64,6 +66,7 @@ public final class AgentTask {
         state.addProperty("completion_verified", canComplete());
         state.add("collected_items", GSON.toJsonTree(collected));
         state.add("failed_targets", GSON.toJsonTree(failedTargets));
+        state.add("owner_grants", GSON.toJsonTree(grants));
         JsonArray results = new JsonArray();
         history.forEach(item -> results.add(item.deepCopy()));
         state.add("tool_results", results);
@@ -75,6 +78,7 @@ public final class AgentTask {
         AgentTask task = GSON.fromJson(json, AgentTask.class);
         if (task == null || task.id == null || task.request == null || task.history == null
             || task.collected == null || task.failedTargets == null) throw new IllegalArgumentException("Invalid task");
+        if (task.grants == null) task.grants = new LinkedHashSet<>();
         return task;
     }
 }

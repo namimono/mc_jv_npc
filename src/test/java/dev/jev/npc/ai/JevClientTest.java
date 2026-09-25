@@ -177,5 +177,20 @@ class JevClientTest {
         assertEquals("unsupported", JevClient.parseIntent(body.replace("0.01", "0.99"), 10).intent().verb());
     }
 
+    @Test void replyInterpretationFallsBackToOtherWhenUnsureOrUnknown() {
+        var options = Communicator.yesNo("The owner agrees", "The owner refuses");
+        var payload = JevClient.replyPayload("jev-1.13.0", "要冒险吗？", options, "你看着办");
+        var question = payload.getAsJsonObject("questions").getAsJsonObject("answer");
+        assertEquals(3, question.getAsJsonObject("criteria").size(), "yes, no and other");
+        assertEquals("你看着办", payload.getAsJsonObject("state").get("owner_reply").getAsString());
+        String body = """
+            {"model":"jev-1.13.0","answers":{"answer":{"type":"choice","choice":"yes","confidence":0.8}}}
+            """;
+        assertEquals("yes", JevClient.parseReply(body, options));
+        assertEquals("other", JevClient.parseReply(body.replace("0.8", "0.3"), options), "unsure answers are not consent");
+        assertEquals("other", JevClient.parseReply(body.replace("\"yes\"", "\"other\""), options));
+        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseReply("{}", options));
+    }
+
     private JevClient localClient() { return new JevClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/systemone")); }
 }

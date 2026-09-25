@@ -8,7 +8,11 @@ import dev.jev.npc.behavior.Skill;
 import dev.jev.npc.config.NpcConfig;
 import dev.jev.npc.entity.JevNpcEntity;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -18,6 +22,7 @@ import net.minecraft.world.item.Items;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Event-driven decision scheduling; all methods except HTTP completion run on the server thread. */
 public final class NpcBrain {
@@ -34,6 +39,7 @@ public final class NpcBrain {
     private AgentTask task;
     private EnvironmentTools environment;
     private String activeStep;
+    private ActionPlan escalated;
     private JsonObject lastTask = new JsonObject();
 
     public boolean hasGoal() { return task != null; }
@@ -68,7 +74,77 @@ public final class NpcBrain {
         else if (success) task.actionSucceeded = true;
         JevNpcMod.LOGGER.info("Jev tool result goal={} round={} tool={} success={} progress={} detail={}",
             task.id, task.rounds, plan.id(), success, progress, detail);
+        if (code.startsWith("needs_permission:") && askPermission(plan, code.substring("needs_permission:".length()), reason)) return;
         event("tool_result", detail, true);
+    }
+
+    public Set<String> grants() { return task == null ? Set.of() : Set.copyOf(task.grants); }
+
+    /** Value judgments (risk, breaking built blocks) belong to the owner; the goal waits for the answer. */
+    private boolean askPermission(ActionPlan plan, String kind, String reason) {
+        if (task.grants.contains(kind)) return false;
+        String prompt = kind.equals("risk")
+            ? reason + "，有点危险。要我冒险过去吗？（回复“可以”或“不要”）"
+            : reason + "。可以挖穿吗？（回复“可以”或“不要”）";
+        String fallback = kind.equals("risk") && npc.personality().equals("brave") ? "yes" : "no";
+        long now = npc.level().getGameTime();
+        escalated = plan;
+        npc.speech().ask(new Communicator.Question(kind, prompt,
+            Communicator.yesNo("The owner agrees or permits it", "The owner refuses or wants it avoided"),
+            fallback, now + JevNpcMod.config().questionTimeoutTicks), now);
+        status = "WAITING_FOR_OWNER: " + kind;
+        JevNpcMod.LOGGER.info("Jev question goal={} kind={} fallback={} plan={}", task.id, kind, fallback, plan.id());
+        return true;
+    }
+
+    private void resolveQuestion(Communicator.Question question, String answer, String source) {
+        npc.speech().resolve();
+        ActionPlan plan = escalated;
+        escalated = null;
+        if (question == null || task == null || plan == null) return;
+        boolean allowed = answer.equals("yes");
+        JevNpcMod.LOGGER.info("Jev answer goal={} kind={} answer={} source={}", task.id, question.kind(), answer, source);
+        task.feedback("owner_permission", allowed, 0, (allowed ? "owner allowed " : "owner refused ") + question.kind() + " (" + source + ")");
+        if (!allowed) {
+            if (source.equals("new_instruction")) return;
+            npc.tellOwner(source.equals("timeout") ? "没等到答复，我先不这么做。" : "好，那我不这么做。");
+            event("owner_refused", "Owner refused " + question.kind() + "; choose another route or report", true);
+            return;
+        }
+        task.grants.add(question.kind());
+        task.failedTargets.remove(plan.id());
+        npc.tellOwner(source.equals("timeout") ? "没等到答复，我按自己的判断继续。" : "好的，我试试。");
+        activeStep = plan.id();
+        npc.skills().start(plan, false);
+    }
+
+    /** Keywords first; then Jev, when configured, decides whether the reply answers the question or is a new instruction. */
+    private void answer(ServerPlayer player, String text) {
+        Communicator.Question question = npc.speech().pending().orElseThrow();
+        var keyword = Communicator.interpret(text);
+        if (keyword.isPresent()) { resolveQuestion(question, keyword.get(), "keyword"); return; }
+        NpcConfig config = JevNpcMod.config();
+        if (!config.enabled || config.effectiveKey().isBlank()) {
+            resolveQuestion(question, "no", "new_instruction");
+            startGoal(player, text);
+            return;
+        }
+        var server = npc.getServer();
+        JevNpcMod.client().interpretReply(config.effectiveKey(), config.model, question.prompt(), question.options(), text, config.requestTimeoutMs)
+            .whenComplete((choice, failure) -> server.execute(() -> {
+                if (npc.speech().pending().orElse(null) != question) return;
+                if (failure == null && question.options().containsKey(choice)) resolveQuestion(question, choice, "jev");
+                else {
+                    resolveQuestion(question, "no", "new_instruction");
+                    startGoal(player, text);
+                }
+            }));
+    }
+
+    /** An undirected chat line from the owner counts as a reply only right after the NPC spoke or asked. */
+    public boolean expectsReply(ServerPlayer player) {
+        return npc.isOwner(player) && player.level() == npc.level() && player.distanceToSqr(npc) <= 16 * 16
+            && npc.speech().expectsReply(npc.level().getGameTime());
     }
 
     private void endGoal(boolean success, String message) {
@@ -81,6 +157,8 @@ public final class NpcBrain {
         task = null;
         environment = null;
         activeStep = null;
+        escalated = null;
+        npc.speech().resolve();
         ownerRequest = "";
         gate.invalidate();
         events.drain();
@@ -96,6 +174,8 @@ public final class NpcBrain {
         task = null;
         environment = null;
         activeStep = null;
+        escalated = null;
+        npc.speech().resolve();
         ownerRequest = "";
         gate.invalidate();
         events.drain();
@@ -120,7 +200,17 @@ public final class NpcBrain {
                 npc.getUUID(), player.getName().getString(), chatIgnoreReason(player), oneLine(text));
             return;
         }
+        if (npc.speech().pending().isPresent()) {
+            answer(player, text);
+            return;
+        }
+        startGoal(player, text);
+    }
+
+    private void startGoal(ServerPlayer player, String text) {
         held = false;
+        npc.speech().resolve();
+        escalated = null;
         npc.skills().stop();
         task = new AgentTask(text);
         environment = new EnvironmentTools(npc);
@@ -142,6 +232,12 @@ public final class NpcBrain {
         ServerPlayer owner = npc.owner();
         if (owner == null || owner.level() != npc.level() || owner.distanceToSqr(npc) > 48 * 48) return;
         long tick = npc.tickCount;
+        if (tick % 40 == 0) notice();
+        Communicator.Question waiting = npc.speech().pending().orElse(null);
+        if (waiting != null) {
+            npc.speech().expire(npc.level().getGameTime()).ifPresent(fallback -> resolveQuestion(waiting, fallback, "timeout"));
+            return;
+        }
         if (task != null) {
             task.elapsedTicks++;
             // A last allowed tool may still finish; round exhaustion is checked before the next HTTP call.
@@ -369,6 +465,49 @@ public final class NpcBrain {
                     "Build a 3x3 oak plank platform three blocks east of the owner's request location, consuming 9 carried planks; never overwrite existing solid blocks.");
         }
         return result;
+    }
+
+    /** Things a player would mention unprompted. The communicator drops repeats and keeps remarks spaced out. */
+    private void notice() {
+        Communicator speech = npc.speech();
+        var level = npc.level();
+        long now = level.getGameTime();
+        long time = level.getDayTime() % 24000;
+        if (time >= 12000 && time < 12600 && level.canSeeSky(npc.blockPosition())) {
+            boolean farFromHome = npc.distanceToSqr(Vec3.atCenterOf(npc.home())) > 32 * 32;
+            speech.remark("nightfall", farFromHome ? "天快黑了，我们离家有点远，小心怪物。" : "天快黑了，怪物要出来了。", 12000, now);
+        }
+        if (npc.getHealth() <= 12 && !npc.skills().emergencyLocked())
+            speech.remark("hurt", "我受伤了，血量只剩 " + Math.round(npc.getHealth()) + "。", 1200, now);
+        int free = 0;
+        for (ItemStack stack : npc.backpack().getItems()) {
+            if (stack.isEmpty()) free++;
+            else if (stack.isDamageableItem() && stack.getDamageValue() >= stack.getMaxDamage() * 0.85)
+                speech.remark("tool:" + BuiltInRegistries.ITEM.getKey(stack.getItem()), stack.getHoverName().getString() + "快用坏了。", 6000, now);
+        }
+        ItemStack held = npc.getMainHandItem();
+        if (held.isDamageableItem() && held.getDamageValue() >= held.getMaxDamage() * 0.85)
+            speech.remark("tool:" + BuiltInRegistries.ITEM.getKey(held.getItem()), held.getHoverName().getString() + "快用坏了。", 6000, now);
+        if (free <= 3) speech.remark("backpack", "背包快满了，只剩 " + free + " 格。", 6000, now);
+        if (npc.tickCount % 200 == 0) {
+            BlockPos center = npc.blockPosition();
+            for (BlockPos cursor : BlockPos.betweenClosed(center.offset(-6, -4, -6), center.offset(6, 4, 6))) {
+                if (!level.hasChunkAt(cursor)) continue;
+                BlockState state = level.getBlockState(cursor);
+                if (!state.is(BlockTags.DIAMOND_ORES) && !state.is(BlockTags.EMERALD_ORES) || !exposed(cursor)) continue;
+                speech.remark("ore:" + cursor.asLong(), "我在 " + cursor.toShortString() + " 附近看到了" + state.getBlock().getName().getString() + "。",
+                    Integer.MAX_VALUE, now);
+                break;
+            }
+        }
+    }
+
+    private boolean exposed(BlockPos pos) {
+        for (Direction direction : Direction.values()) {
+            BlockPos neighbor = pos.relative(direction);
+            if (npc.level().hasChunkAt(neighbor) && npc.level().getBlockState(neighbor).isAir()) return true;
+        }
+        return false;
     }
 
     private static void add(Map<String, ActionPlan> map, String id, Skill skill, BlockPos position,
