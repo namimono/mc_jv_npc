@@ -409,6 +409,32 @@ public final class NpcGameTests implements FabricGameTest {
         });
     }
 
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 1200)
+    public void moveDigsBuildingBlocksThenBridgesGap(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int z = 1; z <= 5; z++) {
+            for (int x = 0; x <= 2; x++) helper.setBlock(x, 4, z, Blocks.SMOOTH_STONE);
+            for (int x = 6; x <= 7; x++) helper.setBlock(x, 4, z, Blocks.SMOOTH_STONE);
+            helper.setBlock(0, 5, z, Blocks.DIRT);
+        }
+        Vec3 start = helper.absoluteVec(new Vec3(1.5, 5, 3.5));
+        npc.moveTo(start.x, start.y, start.z, 0, 0);
+        AgentTask goal = new AgentTask("去对面的平台");
+        goal.intent = new GoalIntent("go_to", "log", "owner", 1, false);
+        CompoundTag brain = new CompoundTag();
+        brain.putString("agentTask", goal.save());
+        brain.putString("activeStep", "test_move");
+        npc.brain().load(brain);
+        npc.skills().start(move(helper.absolutePos(new BlockPos(7, 5, 3))), false);
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.skills().hasTask(), "move must resume after gathering and complete");
+            helper.assertTrue(npc.getX() > helper.absoluteVec(new Vec3(6, 0, 0)).x, "must cross the gap");
+            helper.assertTrue(npc.getY() >= start.y - 0.01, "must not fall");
+            for (int x = 3; x <= 5; x++) helper.assertBlockPresent(Blocks.DIRT, new BlockPos(x, 4, 3));
+            helper.assertTrue(npc.brain().collectedItems().isEmpty(), "dirt dug for bridging is not loot for the owner");
+        });
+    }
+
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
     public void navigatorWalksAroundLava(GameTestHelper helper) {
         var npc = fixture(helper).npc();

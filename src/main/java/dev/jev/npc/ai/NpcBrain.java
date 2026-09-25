@@ -50,19 +50,25 @@ public final class NpcBrain {
     }
 
     public void stepFinished(ActionPlan plan, boolean success, int progress, String reason) {
+        stepFinished(plan, success, progress, reason, "");
+    }
+
+    /** {@code code} is the machine-readable failure reason from the skill layer, e.g. {@code need_blocks:3}. */
+    public void stepFinished(ActionPlan plan, boolean success, int progress, String reason, String code) {
+        String detail = code.isEmpty() ? reason : reason + " [" + code + "]";
         if (task == null || !plan.id().equals(activeStep)) {
-            event(success ? "task_completed" : "task_failed", reason, true);
+            event(success ? "task_completed" : "task_failed", detail, true);
             return;
         }
         activeStep = null;
-        task.feedback(plan.id(), success, progress, reason);
+        task.feedback(plan.id(), success, progress, detail);
         if (!success) task.failedTargets.add(plan.id());
         if (plan.skill() == Skill.HARVEST || plan.skill() == Skill.MINE) task.gathered += progress;
         else if (plan.skill() == Skill.GIVE) task.delivered = success && task.collected.isEmpty();
         else if (success) task.actionSucceeded = true;
         JevNpcMod.LOGGER.info("Jev tool result goal={} round={} tool={} success={} progress={} detail={}",
-            task.id, task.rounds, plan.id(), success, progress, reason);
-        event("tool_result", reason, true);
+            task.id, task.rounds, plan.id(), success, progress, detail);
+        event("tool_result", detail, true);
     }
 
     private void endGoal(boolean success, String message) {

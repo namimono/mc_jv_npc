@@ -62,7 +62,12 @@ public final class SkillRunner {
         BlockPos blockTarget;
         List<BlockPos> spots = List.of();
         final Set<BlockPos> skipped = new HashSet<>();
+        /** Set on a recovery sub-task; the parent resumes when it ends. */
+        Task parent;
+        NavOutcome cause;
+        int recoveries;
         Task(ActionPlan plan) { this.plan = plan; }
+        boolean recovery() { return parent != null; }
         CompoundTag save() {
             CompoundTag tag = plan.save();
             tag.putInt("progress", progress);
@@ -85,7 +90,9 @@ public final class SkillRunner {
     }
     public Navigator navigator() { return navigator; }
     public String summary() {
-        return active == null ? "idle (" + lastOutcome + ")" : active.plan.skill() + " " + active.progress + "/" + active.plan.count();
+        if (active == null) return "idle (" + lastOutcome + ")";
+        String progress = active.plan.skill() + " " + active.progress + "/" + active.plan.count();
+        return active.recovery() ? "gathering building blocks " + progress + " for " + active.parent.plan.skill() : progress;
     }
     public boolean hasTask() { return active != null; }
     public boolean hasSuspendedTask() { return suspended != null; }
@@ -201,7 +208,7 @@ public final class SkillRunner {
         if (npc.distanceToSqr(owner) <= 3 * 3) {
             navigator.stop();
             npc.getLookControl().setLookAt(owner, 30, 30);
-        } else if (travel(NavGoal.near(owner.blockPosition(), 2), policy(), 1.05) == Navigator.Status.FAILED) retryLater();
+        } else if (travel(NavGoal.near(owner.blockPosition(), 2), policy(), 1.05) == Navigator.Status.FAILED && !recover()) retryLater();
     }
 
     private void move() {
@@ -232,7 +239,7 @@ public final class SkillRunner {
         if (enemy != null && enemy.distanceToSqr(Vec3.atCenterOf(anchor)) <= 12 * 12) {
             combat(enemy);
         } else if (npc.distanceToSqr(Vec3.atBottomCenterOf(anchor)) > 2.5) {
-            if (travel(NavGoal.near(anchor, 1), policy(), 1) == Navigator.Status.FAILED) retryLater();
+            if (travel(NavGoal.near(anchor, 1), policy(), 1) == Navigator.Status.FAILED && !recover()) retryLater();
         } else navigator.stop();
     }
 
@@ -253,7 +260,7 @@ public final class SkillRunner {
                 npc.doHurtTarget(target);
             }
         } else if (travel(NavGoal.near(target.blockPosition(), 1), walking(), 1.15) == Navigator.Status.FAILED) {
-            if (active.plan.skill() == Skill.ATTACK) finish(false, "够不到攻击目标");
+            if (active.plan.skill() == Skill.ATTACK) finish(false, "够不到攻击目标", navigator.failure().code());
             else retryLater();
         }
     }
@@ -275,11 +282,19 @@ public final class SkillRunner {
         for (BlockPos mutable : BlockPos.betweenClosed(center.offset(-8, -2, -8), center.offset(8, 6, 8))) {
             BlockPos position = mutable.immutable();
             if (skipped.contains(position) || npc.distanceToSqr(Vec3.atCenterOf(position)) > 20 * 20
-                || !isWorkTarget(position, material)) continue;
+                || !isWorkTarget(position, material) || material.equals("blocks") && standsOn(position)) continue;
             double distance = npc.distanceToSqr(Vec3.atCenterOf(position));
             if (distance < bestDistance) { bestDistance = distance; best = position; }
         }
         return Optional.ofNullable(best);
+    }
+
+    /** Blocks dug for bridging must not be anyone's floor or leave a hole that drops into open space. */
+    private boolean standsOn(BlockPos position) {
+        ServerPlayer owner = npc.owner();
+        BlockPos below = position.below();
+        return position.equals(npc.blockPosition().below()) || owner != null && position.equals(owner.blockPosition().below())
+            || !npc.level().getBlockState(below).isFaceSturdy(npc.level(), below, Direction.UP);
     }
 
     public boolean isWorkTarget(BlockPos position, String material) {
@@ -299,6 +314,10 @@ public final class SkillRunner {
             case "log" -> state.is(BlockTags.LOGS);
             case "ground" -> state.is(Blocks.GRASS_BLOCK) || state.is(Blocks.DIRT) || state.is(Blocks.COARSE_DIRT)
                 || state.is(Blocks.PODZOL) || state.is(Blocks.ROOTED_DIRT);
+            // Natural blocks whose drops are placeable building blocks.
+            case "blocks" -> state.is(Blocks.GRASS_BLOCK) || state.is(Blocks.DIRT) || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.PODZOL) || state.is(Blocks.STONE) || state.is(Blocks.DEEPSLATE) || state.is(Blocks.ANDESITE)
+                || state.is(Blocks.DIORITE) || state.is(Blocks.GRANITE) || state.is(Blocks.TUFF) || state.is(Blocks.NETHERRACK);
             default -> state.is(Blocks.STONE) || state.is(Blocks.COBBLESTONE);
         };
     }
@@ -346,7 +365,10 @@ public final class SkillRunner {
         if (active.plan.position() == null) { finish(false, "没有作业区域"); return; }
         if (active.progress >= active.plan.count()) { finish(true, "采集数量已完成"); return; }
         boolean logs = active.plan.skill() == Skill.HARVEST;
-        String material = logs ? "log" : active.plan.argument().equals("ground") ? "ground" : "stone";
+        String material = logs ? "log" : switch (active.plan.argument()) {
+            case "ground", "blocks" -> active.plan.argument();
+            default -> "stone";
+        };
         if (!equip(logs ? Items.IRON_AXE : Items.IRON_PICKAXE, EquipmentSlot.MAINHAND)) {
             finish(false, "缺少所需工具"); return;
         }
@@ -399,7 +421,7 @@ public final class SkillRunner {
                 ItemStack copy = drop.copy();
                 ItemStack remainder = npc.backpack().addItem(drop);
                 copy.setCount(copy.getCount() - remainder.getCount());
-                npc.brain().recordCollected(copy);
+                if (!active.recovery()) npc.brain().recordCollected(copy);
                 if (!remainder.isEmpty()) npc.spawnAtLocation(remainder);
             }
             tool.hurtAndBreak(1, npc, EquipmentSlot.MAINHAND);
@@ -565,7 +587,39 @@ public final class SkillRunner {
     /** Continuous skills survive a failed route and try again every few seconds. */
     private void retryLater() { if (active.ticks % 100 == 0) navigator.stop(); }
 
-    private void navigationFailed() { finish(false, describe(navigator.failure())); }
+    private void navigationFailed() {
+        NavOutcome failure = navigator.failure();
+        if (!recover()) finish(false, describe(failure), failure == null ? "unreachable" : failure.code());
+    }
+
+    /** Starts a recovery sub-task for a failed route when a rule covers it; the current task resumes afterwards. */
+    private boolean recover() {
+        NavOutcome failure = navigator.failure();
+        if (failure == null || active.recovery() || active.recoveries >= Recovery.MAX_ATTEMPTS) return false;
+        NpcConfig config = JevNpcMod.config();
+        var fix = Recovery.plan(failure, npc.blockPosition(), config.allowBlockChanges && config.navAllowBreak);
+        if (fix.isEmpty()) return false;
+        Task child = new Task(fix.get());
+        child.parent = active;
+        child.cause = failure;
+        active.recoveries++;
+        navigator.stop();
+        active = child;
+        JevNpcMod.LOGGER.info("Jev recovery npc={} for={} outcome={} plan={}x{}", npc.getUUID(), child.parent.plan.id(),
+            failure.code(), fix.get().argument(), fix.get().count());
+        npc.tellOwner(describe(failure) + "，我先在附近挖 " + fix.get().count() + " 块泥土或石头垫脚。");
+        return true;
+    }
+
+    private void endRecovery(boolean enough, String reason) {
+        Task child = active;
+        clearCracks();
+        navigator.stop();
+        active = child.parent;
+        JevNpcMod.LOGGER.info("Jev recovery ended npc={} for={} gathered={} detail={}", npc.getUUID(), active.plan.id(), child.progress, reason);
+        if (enough) npc.tellOwner("垫脚方块准备好了，继续出发。");
+        else finish(false, describe(child.cause) + "，附近也挖不到可用的泥土或石头", child.cause.code());
+    }
 
     public static String describe(NavOutcome outcome) {
         return switch (outcome) {
@@ -615,8 +669,15 @@ public final class SkillRunner {
         npc.brain().requestHandled();
     }
 
-    private void finish(boolean success, String reason) {
+    private void finish(boolean success, String reason) { finish(success, reason, ""); }
+
+    /** {@code code} is a stable machine-readable failure reason such as {@code need_blocks:3}; empty on success. */
+    private void finish(boolean success, String reason, String code) {
         if (active == null) return;
+        if (active.recovery()) {
+            endRecovery(success || active.progress > 0, reason);
+            return;
+        }
         ActionPlan finishedPlan = active.plan;
         int progress = active.progress;
         String skill = active.plan.skill().name();
@@ -626,7 +687,7 @@ public final class SkillRunner {
         lastOutcome = (success ? "completed: " : "failed: ") + skill + " " + reason;
         npc.remember(lastOutcome);
         npc.tellOwner(reason);
-        npc.brain().stepFinished(finishedPlan, success, progress, reason);
+        npc.brain().stepFinished(finishedPlan, success, progress, reason, code);
         npc.brain().requestHandled();
     }
 
@@ -639,8 +700,9 @@ public final class SkillRunner {
 
     public CompoundTag save() {
         CompoundTag tag = new CompoundTag();
-        if (active != null) tag.put("active", active.save());
-        if (suspended != null) tag.put("suspended", suspended.save());
+        // A recovery is re-derived from the next failed route after loading, so only its parent is stored.
+        if (active != null) tag.put("active", (active.recovery() ? active.parent : active).save());
+        if (suspended != null) tag.put("suspended", (suspended.recovery() ? suspended.parent : suspended).save());
         tag.putString("outcome", lastOutcome);
         return tag;
     }
