@@ -23,8 +23,14 @@ public final class NpcConfig {
     public int navMaxNodes = 6000;
     public int navNodesPerTick = 1500;
     public int questionTimeoutTicks = 1200;
+    public boolean autonomyEnabled = true;
+    public int autonomyIdleTicks = 200;
+    public boolean autonomyMayModifyWorld = true;
+    public int autonomyHomeRadius = 24;
 
     public void validate() {
+        autonomyIdleTicks = Math.clamp(autonomyIdleTicks, 40, 12000);
+        autonomyHomeRadius = Math.clamp(autonomyHomeRadius, 4, 128);
         questionTimeoutTicks = Math.clamp(questionTimeoutTicks, 200, 12000);
         navMaxFall = Math.clamp(navMaxFall, 1, 8);
         navMaxNodes = Math.clamp(navMaxNodes, 500, 50000);

@@ -14,6 +14,7 @@ import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
@@ -395,6 +396,33 @@ public final class NpcGameTests implements FabricGameTest {
             helper.assertTrue(npc.distanceToSqr(Vec3.atBottomCenterOf(destination)) < 2.5, "must dig out once allowed");
             helper.assertFalse(npc.skills().hasTask(), "move must complete");
         });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)
+    public void idleNpcPicksUpLooseDropsButNotItemsThePlayerThrew(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        Vec3 spot = helper.absoluteVec(new Vec3(3.5, 1, 4.5));
+        var loose = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.FLINT, 3));
+        var thrown = new ItemEntity(helper.getLevel(), spot.x, spot.y, spot.z, new ItemStack(Items.EMERALD, 1));
+        loose.setNoPickUpDelay();
+        thrown.setNoPickUpDelay();
+        thrown.setThrower(fixture.owner());
+        helper.getLevel().addFreshEntity(loose);
+        helper.getLevel().addFreshEntity(thrown);
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.backpack().countItem(Items.FLINT) == 3, "loose drops within reach are collected");
+            helper.assertTrue(thrown.isAlive() && npc.backpack().countItem(Items.EMERALD) == 0, "items a player threw are left alone");
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 800)
+    public void idleNpcWithoutKeyStocksBuildingBlocksOnItsOwn(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int x = 4; x <= 6; x++) for (int z = 4; z <= 6; z++) helper.setBlock(x, 1, z, Blocks.DIRT);
+        npc.brain().wake();
+        helper.succeedWhen(() -> helper.assertTrue(npc.backpack().countItem(Items.DIRT) >= 4,
+            "an idle diligent NPC must dig its own building blocks without any model call"));
     }
 
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)

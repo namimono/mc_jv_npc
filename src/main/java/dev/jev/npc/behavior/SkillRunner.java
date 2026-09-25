@@ -23,6 +23,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.util.DefaultRandomPos;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -179,7 +180,11 @@ public final class SkillRunner {
 
     public void tick() {
         if ((npc.isOnFire() || npc.isInLava()) && !emergencyLocked()) emergencyRetreat();
-        if (active == null) return;
+        if (npc.tickCount % 10 == 0) pickUpNearbyItems();
+        if (active == null) {
+            lookAtOwner();
+            return;
+        }
         // Do not operate on a world for an absent owner, including after reload/dimension changes.
         ServerPlayer owner = npc.owner();
         if (owner == null || owner.level() != npc.level() || owner.distanceToSqr(npc) > 64 * 64) {
@@ -198,6 +203,25 @@ public final class SkillRunner {
             case BUILD -> build();
             case GIVE -> give();
             default -> finish(false, "不支持的持续技能");
+        }
+    }
+
+    private void lookAtOwner() {
+        ServerPlayer owner = npc.owner();
+        if (owner != null && owner.level() == npc.level() && npc.distanceToSqr(owner) <= 8 * 8) npc.getLookControl().setLookAt(owner, 30, 30);
+    }
+
+    /** Collects loose drops within reach, except items a player threw on purpose. */
+    private void pickUpNearbyItems() {
+        for (ItemEntity item : npc.level().getEntitiesOfClass(ItemEntity.class, npc.getBoundingBox().inflate(2, 1, 2),
+                item -> item.isAlive() && !item.hasPickUpDelay() && !(item.getOwner() instanceof Player))) {
+            ItemStack stack = item.getItem();
+            ItemStack rest = npc.backpack().addItem(stack.copy());
+            int taken = stack.getCount() - rest.getCount();
+            if (taken == 0) continue;
+            npc.take(item, taken);
+            if (rest.isEmpty()) item.discard();
+            else item.setItem(rest);
         }
     }
 
@@ -274,6 +298,11 @@ public final class SkillRunner {
     /** Search is bounded and only touches loaded chunks. Tree candidates require nearby leaves. */
     public Optional<BlockPos> findWorkBlock(BlockPos center, boolean logs) {
         return findWorkBlock(center, logs ? "log" : "stone", Set.of());
+    }
+
+    /** {@code material} is {@code log}, {@code ground}, {@code stone} or {@code blocks} (natural building-block sources). */
+    public Optional<BlockPos> findWorkBlock(BlockPos center, String material) {
+        return findWorkBlock(center, material, Set.of());
     }
 
     private Optional<BlockPos> findWorkBlock(BlockPos center, String material, Set<BlockPos> skipped) {

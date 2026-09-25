@@ -11,6 +11,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.ItemTags;
+import net.minecraft.world.entity.ai.util.LandRandomPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.nbt.CompoundTag;
@@ -31,6 +33,9 @@ public final class NpcBrain {
     private final DecisionGate gate = new DecisionGate();
     private long nextDecisionTick;
     private long lastIdleTick;
+    private long lastAutonomyTick;
+    private long idleSince;
+    private List<Drives.Need> needs = List.of();
     private String weather;
     private String status = "local / no decision yet";
     private String ownerRequest = "";
@@ -270,12 +275,20 @@ public final class NpcBrain {
             event("periodic_check", "Review current activity; continuing is usually appropriate", false);
             lastIdleTick = tick;
         }
+        boolean idle = task == null && !npc.skills().hasTask();
+        if (!idle) idleSince = tick;
+        if (idle && config.autonomyEnabled && tick - lastAutonomyTick >= config.autonomyIdleTicks) {
+            event("idle", "No owner goal and nothing running; consider the NPC's own needs in `drives`", false);
+            lastAutonomyTick = tick;
+        }
         if (!events.ready(tick, config.eventDebounceTicks) || gate.inFlight() || tick < nextDecisionTick) return;
+        if (task == null) needs = Drives.needs(driveState());
         if (!config.enabled || config.effectiveKey().isBlank()) {
             status = config.enabled ? "NO_KEY: 本地技能模式" : "DISABLED: 本地技能模式";
             Map<String, String> skipped = events.drain();
             JevNpcMod.LOGGER.info("Jev request skipped npc={} reason={} ownerRequest=\"{}\" events=[{}]",
                 npc.getUUID(), status, oneLine(ownerRequest), formatEvents(skipped));
+            if (idle && config.autonomyEnabled) chooseLocally();
             return;
         }
         long nowMs = monotonicMs();
@@ -464,7 +477,56 @@ public final class NpcBrain {
                 add(result, "build_platform", Skill.BUILD, anchor.offset(3, 0, 0), null, "oak_platform_3x3", 9,
                     "Build a 3x3 oak plank platform three blocks east of the owner's request location, consuming 9 carried planks; never overwrite existing solid blocks.");
         }
+        // The NPC's own initiatives exist only for measured needs, and gathering only where autonomy may change the world.
+        for (Drives.Need need : needs) {
+            String why = " Serves the NPC's own need: " + need.reason() + ".";
+            switch (need.action()) {
+                case "stock_blocks" -> add(result, "stock_blocks", Skill.MINE, npc.blockPosition(), null, "blocks", 8,
+                    "Dig 8 natural dirt or stone blocks nearby to keep building blocks for bridging and pillaring." + why);
+                case "stock_wood" -> add(result, "stock_wood", Skill.HARVEST, npc.blockPosition(), null, "", 4,
+                    "Collect 4 logs from a natural tree nearby to keep for later." + why);
+                case "rejoin_owner" -> {
+                    ServerPlayer owner = npc.owner();
+                    if (owner != null) add(result, "rejoin_owner", Skill.MOVE, owner.blockPosition(), null, "", 1,
+                        "Walk back to where the owner is now, then stay free for other activities." + why);
+                }
+                case "wander" -> {
+                    Vec3 spot = LandRandomPos.getPos(npc, 6, 3);
+                    if (spot != null) add(result, "wander", Skill.MOVE, BlockPos.containing(spot), null, "", 1,
+                        "Stroll to a nearby spot and look around." + why);
+                }
+                default -> {}
+            }
+        }
         return result;
+    }
+
+    private Drives.State driveState() {
+        NpcConfig config = JevNpcMod.config();
+        ServerPlayer owner = npc.owner();
+        double homeDistance = Math.sqrt(npc.distanceToSqr(Vec3.atCenterOf(npc.home())));
+        boolean mayGather = config.autonomyMayModifyWorld && config.allowBlockChanges && homeDistance <= config.autonomyHomeRadius;
+        int logs = 0;
+        for (ItemStack stack : npc.backpack().getItems()) if (stack.is(ItemTags.LOGS)) logs += stack.getCount();
+        return new Drives.State(npc.getHealth(), npc.getMaxHealth(), npc.backpack().countItem(Items.BREAD),
+            npc.skills().navigator().carriedBlocks(), logs, npc.level().isNight(), homeDistance,
+            owner == null ? 0 : npc.distanceTo(owner), npc.skills().nearestEnemy(16) != null, npc.tickCount - idleSince,
+            npc.personality(), mayGather,
+            mayGather && npc.skills().findWorkBlock(npc.blockPosition(), "blocks").isPresent(),
+            mayGather && npc.skills().findWorkBlock(npc.blockPosition(), "log").isPresent());
+    }
+
+    /** Without a model the most pressing weighted need wins, so autonomy never depends on a paid call. */
+    private void chooseLocally() {
+        var need = Drives.choose(needs, npc.personality());
+        if (need.isEmpty()) return;
+        String action = need.get().action();
+        ActionPlan plan = options().get(action);
+        if (plan == null) return;
+        JevNpcMod.LOGGER.info("Jev autonomy npc={} source=local need={} action={} urgency={}", npc.getUUID(), need.get().id(),
+            action, String.format(java.util.Locale.ROOT, "%.2f", Drives.weighted(need.get(), npc.personality())));
+        status = "AUTONOMY(local): " + action;
+        npc.skills().start(plan, plan.skill() == Skill.ATTACK || plan.skill() == Skill.FLEE);
     }
 
     /** Things a player would mention unprompted. The communicator drops repeats and keeps remarks spaced out. */
@@ -525,7 +587,7 @@ public final class NpcBrain {
         if (task != null) {
             state.add("task", task.state());
             state.add("environment", environment.state());
-        }
+        } else state.add("drives", Drives.json(needs, npc.personality()));
         state.addProperty("current_task", npc.skills().summary());
         state.addProperty("suspended_task", npc.skills().suspendedSummary());
         state.addProperty("owner_request", ownerRequest.isBlank() ? "No new outstanding owner request" : ownerRequest);
