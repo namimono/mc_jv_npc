@@ -51,8 +51,14 @@ public final class ClientValidation implements ClientModInitializer {
     private volatile String failure;
     private volatile String outboundChat;
     private int chatBaseline;
+    private volatile int questionBaseline;
+    private volatile boolean nightHandled;
     private Communicator.Question pendingQuestion;
     private String pendingGoal;
+    private int llmBaseline, actionLlmBaseline = -1;
+    private String asyncActivity;
+    private boolean hurtInjected;
+    private int breadBefore;
     private JevNpcEntity npc;
 
     @Override public void onInitializeClient() {
@@ -93,13 +99,15 @@ public final class ClientValidation implements ClientModInitializer {
             }
             if (capture == captured) return;
             client.options.hideGui = capture < 3;
+            boolean textReady = capture != 3 || received.stream().skip(questionBaseline).anyMatch(text -> text.startsWith("<小杰>") && (text.contains("挖") || text.contains("墙")));
+            if (capture == 4) textReady = nightHandled;
+            if (!textReady) { settled = 0; return; }
+            // Message receipt can precede its first rendered frame. Wait after the required text arrives.
             if (++settled < 20) return;
-            if (capture == 3 && received.stream().noneMatch(text -> text.contains("可以挖穿吗"))) return;
-            if (capture == 4 && received.stream().noneMatch(text -> text.contains("天快黑了"))) return;
             Screenshot.grab(client.gameDirectory, "stage-" + capture + ".png", client.getMainRenderTarget(), message -> {});
             captured = capture;
             settled = 0;
-            if (capture == 4) finish(client, true, "Client received idle chat, two contextual explanations, the permission question and the nightfall remark; six rendered frames captured.");
+            if (capture == 4) finish(client, true, "Client received idle chat, the contextual explanation and permission question; Jev processed nightfall with discretion to remain silent; seven rendered frames captured; Jev routing and review, asynchronous chat, multi-stage twelve-stone delivery, and unavailable-Jev isolation verified.");
         } catch (Throwable error) { finish(client, false, error.getClass().getSimpleName() + ": " + error.getMessage()); }
     }
 
@@ -191,6 +199,18 @@ public final class ClientValidation implements ClientModInitializer {
                 case 12 -> {
                     require(!npc.brain().hasGoal(), "Chat must remain task-free after rendering");
                     if (captured != 5) return;
+                    stand(player, level, -1.5, -50, 3.5, 90, 15, false);
+                    npc.skills().start(new dev.jev.npc.behavior.ActionPlan("validation_follow", dev.jev.npc.behavior.Skill.FOLLOW, null, player.getUUID(), "", 1, "Continuous movement for async dialogue check"), false);
+                    asyncActivity = npc.skills().summary();
+                    chat("@小杰 你跟着我的时候，可以跟我说说现在的天气吗？");
+                    stage = 16; ticks = 0;
+                }
+                case 16 -> {
+                    require(npc.skills().hasTask() && npc.skills().summary().startsWith("FOLLOW"), "dialogue must preserve ongoing follow: " + npc.skills().summary());
+                    if (latestReply() == null) return;
+                    record("ASYNC CHAT: " + latestReply() + "; body preserved=" + asyncActivity + "; routing=" + npc.brain().dialogueState());
+                    npc.skills().stop();
+                    stand(player, level, 5.5, -50, 2.5, 90, 25, false);
                     stage = 2; ticks = 0;
                 }
                 case 2 -> {
@@ -231,13 +251,18 @@ public final class ClientValidation implements ClientModInitializer {
                 }
                 case 6 -> {
                     var question = npc.speech().pending();
-                    if (question.isEmpty()) return;
+                    if (question.isEmpty()) {
+                        if (ticks > 240 && !npc.brain().hasGoal() && !npc.brain().dialogueState().has("phase"))
+                            throw new IllegalStateException("Permission scenario has no adopted goal: " + npc.brain().dialogueState());
+                        return;
+                    }
                     require(question.get().kind().equals("break_built"), "Expected a break_built question: " + question.get());
                     require(level.getBlockState(new BlockPos(21, -60, 0)).is(Blocks.OAK_PLANKS), "Nothing may be broken before the owner answers");
                     record("QUESTION: " + question.get().prompt());
                     pendingQuestion = question.get();
                     pendingGoal = npc.brain().taskState().get("id").getAsString();
                     goalStarted = true;
+                    questionBaseline = received.size();
                     capture = 3; stage = 7; ticks = 0;
                 }
                 case 7 -> {
@@ -254,14 +279,15 @@ public final class ClientValidation implements ClientModInitializer {
                         "Explanation must refer to the pending route: " + reply);
                     record("QUESTION CHAT with Jev: " + reply + "; same goal and question, no grant.");
                     JevNpcMod.config().enabled = false;
+                    llmBaseline = npc.brain().dialogueState().get("llm_requests").getAsInt();
                     chat("挖墙会弄坏房子吗？");
                     stage = 14; ticks = 0;
                 }
                 case 14 -> {
                     questionUnchanged(level);
-                    String reply = latestReply();
-                    if (reply == null) return;
-                    record("QUESTION CHAT without Jev: " + reply + "; same goal and question, no grant.");
+                    if (ticks < 240) return;
+                    require(npc.brain().dialogueState().get("llm_requests").getAsInt() == llmBaseline, "Jev unavailable must not bypass routing into DeepSeek");
+                    record("JEV UNAVAILABLE: no new DeepSeek calls; same goal/question, no permission grant; state=" + npc.brain().dialogueState());
                     JevNpcMod.config().enabled = true;
                     capture = 6; stage = 15; ticks = 0;
                 }
@@ -274,6 +300,48 @@ public final class ClientValidation implements ClientModInitializer {
                     require(planks < 34, "The NPC must dig out once allowed; planks left " + planks);
                     require(npc.distanceTo(player) < 4, "NPC must reach the owner");
                     record("PERMISSION: planksLeft=" + planks + " state=" + npc.brain().taskState());
+                    stage = 17; ticks = 0;
+                }
+                case 17 -> {
+                    if (npc.brain().dialogueState().has("phase")) return;
+                    npc.skills().stop();
+                    npc.brain().hold();
+                    fill(level, 35, -60, 0, 38, -58, 0, Blocks.STONE);
+                    npc.moveTo(33.5, -60, 2.5, 0, 0);
+                    npc.home(new BlockPos(33, -60, 2));
+                    stand(player, level, 34.5, -60, 5.5, 180, 15, false);
+                    chat("@小杰 帮我挖十二块圆石交给我，然后回到你家。受伤先吃面包。");
+                    goalStarted = false; actionLlmBaseline = -1;
+                    stage = 18; ticks = 0;
+                }
+                case 18 -> {
+                    if (npc.brain().hasGoal()) {
+                        if (actionLlmBaseline < 0) {
+                            actionLlmBaseline = npc.brain().dialogueState().get("llm_requests").getAsInt();
+                            var plan = npc.brain().taskState().getAsJsonObject("plan");
+                            require(plan != null && plan.getAsJsonArray("stages").size() >= 2, "compound request must retain multiple stages");
+                            require(plan.getAsJsonArray("stages").get(0).getAsJsonObject().get("amount").getAsInt() == 12, "count must remain twelve");
+                        }
+                        require(npc.brain().dialogueState().get("llm_requests").getAsInt() == actionLlmBaseline, "execution must not delegate action planning to DeepSeek");
+                    }
+                    if (!hurtInjected && npc.skills().summary().startsWith("MINE")) {
+                        hurtInjected = true;
+                        breadBefore = npc.backpack().countItem(Items.BREAD);
+                        npc.hurt(level.damageSources().generic(), 6);
+                        record("INJURY: six damage during mining; Jev must select healing without replacing the current stage.");
+                    }
+                    if (!completed()) return;
+                    require(hurtInjected && npc.getHealth() == npc.getMaxHealth() && npc.backpack().countItem(Items.BREAD) == breadBefore - 1,
+                        "Jev must heal the injury with exactly one bread while preserving the mining goal");
+                    require(player.getInventory().countItem(Items.COBBLESTONE) == 12, "owner must receive exactly twelve cobblestone");
+                    require(npc.distanceToSqr(net.minecraft.world.phys.Vec3.atBottomCenterOf(npc.home())) < 4, "second stage must return home");
+                    record("COMPOSED GOAL: twelve cobblestone delivered, returned home; no language calls during execution; state=" + npc.brain().taskState());
+                    require(npc.brain().dialogueState().get("route_decisions").getAsInt() > 0 && npc.brain().dialogueState().get("review_decisions").getAsInt() > 0, "live Jev routing and review must both occur");
+                    stand(player, level, 36.5, -56, 9.5, 160, 25, true);
+                    capture = 7; stage = 19; ticks = 0;
+                }
+                case 19 -> {
+                    if (captured != 7) return;
                     stage = 8; ticks = 0;
                 }
                 case 8 -> {
@@ -282,7 +350,7 @@ public final class ClientValidation implements ClientModInitializer {
                     npc.setHealth(npc.getMaxHealth());
                     for (int slot = 0; slot < npc.backpack().getContainerSize(); slot++)
                         if (Navigator.BUILDING_BLOCKS.contains(npc.backpack().getItem(slot).getItem())) npc.backpack().setItem(slot, ItemStack.EMPTY);
-                    stand(player, level, 27.5, -57, 0.5, 90, 30, true);
+                    stand(player, level, 36.5, -57, 2.5, 90, 30, true);
                     JevNpcMod.config().autonomyEnabled = true;
                     record("AUTONOMY setup: idle diligent NPC near home with no building blocks; owner nearby; live Jev decides.");
                     stage = 9; ticks = 0;
@@ -293,6 +361,14 @@ public final class ClientValidation implements ClientModInitializer {
                         + " activity=" + npc.skills().summary() + " afterTicks=" + ticks);
                     level.setDayTime(12100);
                     capture = 4; stage = 10; ticks = 0;
+                }
+                case 10 -> {
+                    var dialogue = npc.brain().dialogueState();
+                    if (!dialogue.get("last_purpose").getAsString().equals("nightfall")) return;
+                    String outcome = dialogue.get("last_outcome").getAsString();
+                    require(List.of("send_reply", "send_facts", "drop_message").contains(outcome), "nightfall must be decided by Jev: " + dialogue);
+                    if (!nightHandled) record("NIGHTFALL: Jev chose " + outcome + "; dialogue=" + dialogue);
+                    nightHandled = true;
                 }
                 default -> {}
             }

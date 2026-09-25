@@ -41,6 +41,17 @@ public final class EnvironmentTools {
             add(choices, "finish_goal", Skill.FINISH, null, "", 1, "Finish the goal; code has verified its completion conditions.");
             return choices;
         }
+        if (task.plan != null) {
+            for (int i = 0; i < task.plan.stages().size(); i++) {
+                if (i == task.stageIndex || task.stageComplete(i)) continue;
+                GoalPlan.Stage stage = task.plan.stages().get(i);
+                boolean persistent = java.util.Set.of("follow", "wait", "guard").contains(stage.method().verb());
+                if (persistent && java.util.stream.IntStream.range(0, i).anyMatch(index -> !task.stageComplete(index))) continue;
+                add(choices, "select_stage_" + i, Skill.CONTINUE, null, "", 1,
+                    "Switch to stage " + i + ": " + stage.purpose() + ". Only if dependencies and the owner's ordering constraints permit. Preserve progress in other stages.");
+            }
+        }
+        if (task.stageComplete()) return choices;
         if (intent.gathering() && intent.deliverToOwner() && !task.collected.isEmpty())
             add(choices, "deliver_collected", Skill.GIVE, null, "", 1,
                 "Walk to the owner and deliver only this task's collected items. Prefer reaching requested amount first, but deliver partial results if no more targets remain.");

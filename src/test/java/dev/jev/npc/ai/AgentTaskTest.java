@@ -50,4 +50,30 @@ class AgentTaskTest {
         assertEquals(12, task.history.size());
         assertEquals("去水里", task.state().get("request").getAsString());
     }
+    @Test void stagesPreserveProgressAndRequireActualDeliveryBeforeWholeGoalCompletion() {
+        AgentTask task = new AgentTask("拿十二块圆石再回家");
+        task.setPlan(GoalPlan.parse(com.google.gson.JsonParser.parseString(DeepSeekClientTest.planJson()).getAsJsonObject()));
+        task.gathered = 7;
+        task.collected.put("minecraft:cobblestone", 7);
+        task.selectStage(1);
+        task.actionSucceeded = true;
+        assertFalse(task.canComplete());
+        task = AgentTask.load(task.save());
+        assertTrue(task.stageComplete(1));
+        task.selectStage(0);
+        assertEquals(7, task.gathered);
+        assertEquals(7, task.collected.get("minecraft:cobblestone"));
+        assertFalse(task.actionSucceeded);
+        task.gathered = 12;
+        assertFalse(task.canComplete(), "twelve mined is not twelve delivered");
+        task.collected.clear();
+        task.delivered = true;
+        assertTrue(task.canComplete());
+        assertEquals(task.state(), AgentTask.load(task.save()).state());
+    }
+
+    @Test void persistentActionCannotHideUnfinishedLaterWork() {
+        String invalid = DeepSeekClientTest.planJson().replace("\"mine\"", "\"follow\"");
+        assertThrows(IllegalArgumentException.class, () -> GoalPlan.parse(com.google.gson.JsonParser.parseString(invalid).getAsJsonObject()));
+    }
 }

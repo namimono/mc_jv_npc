@@ -1,5 +1,8 @@
 # 分层 Agent 设计：运动、恢复、发言、自主与对话
 
+> 本文记录旧版设计。当前 `codex/jev-led-harness` 分工、调用边界及验收见 [Jev 主导 Harness](deepseek-harness-proposal.md) 与 [客户端验收](client-validation.md)。旧版 DeepSeek 直达任务、本地语义回退和关键词授权已被替换。
+
+
 更新：2026-09-25。本文是 [design.md](design.md) 之后的下一阶段方案，当前决策结构见 [decision-architecture.md](decision-architecture.md)，交付状态见 [development-progress.md](development-progress.md)。
 
 **感知与决策按时间尺度分层，模型只在代码无法或无权决定时被叫醒。** 从 A 走到 B 的过程里，跳、落、挖穿、垫高、搭桥、绕开岩浆都是 tick 级的「感知 → 行动」循环，由代码里的寻路规划器完成。模型面对的是少量目标级动作，以及代码整理好的、带选项的价值取舍。这样模型调用次数不随地形复杂度增长，暴露给模型的方法也不会膨胀。

@@ -1,5 +1,8 @@
 # NPC 决策架构
 
+> 本文记录旧版设计。当前 `codex/jev-led-harness` 分工、调用边界及验收见 [Jev 主导 Harness](deepseek-harness-proposal.md) 与 [客户端验收](client-validation.md)。旧版 DeepSeek 直达任务、本地语义回退和关键词授权已被替换。
+
+
 更新：2026-09-25。这是当前代码的结构说明，方案边界见 [design.md](design.md)，交付状态见 [development-progress.md](development-progress.md)。寻路器、恢复规则、向主人提问、自主需求和 DeepSeek 对话的分层设计见 [layered-agent.md](layered-agent.md)；下图的「SkillRunner」现在把所有移动交给 `navigation/Navigator`，「无事件时的周期检查」之外还有空闲时的自主评估。
 
 **模型只做有限选择，游戏代码拥有世界和执行。** 一次判断可以驱动几十到几百个 tick 的寻路、采集或战斗。危险不等云端，由本地技能立刻处理。

@@ -38,7 +38,29 @@ public final class NpcBrain {
     private long idleSince;
     private List<Drives.Need> needs = List.of();
     private final Conversation conversation = new Conversation();
-    private long conversationTurn;
+    private final DialogueSession dialogue = new DialogueSession();
+    private Communicator.Question dialogueQuestion;
+    private long nextDialogueTick;
+    private int dialogueFailures;
+    private int dialogueRoutes, dialogueReviews, llmRequests;
+    private String lastDialogueOutcome = "none";
+    private long lastDialogueId;
+    private String lastDialoguePurpose = "none";
+    private final Map<String, Long> noticeCooldowns = new java.util.HashMap<>();
+    private record SpeechNotice(String purpose, String fact, Communicator.Question question) {}
+    private SpeechNotice queuedSpeech;
+    private BlockPos dialogueAnchor;
+
+    public JsonObject dialogueState() {
+        JsonObject state = dialogue.state();
+        state.addProperty("route_decisions", dialogueRoutes);
+        state.addProperty("review_decisions", dialogueReviews);
+        state.addProperty("llm_requests", llmRequests);
+        state.addProperty("last_outcome", lastDialogueOutcome);
+        state.addProperty("last_event_id", lastDialogueId);
+        state.addProperty("last_purpose", lastDialoguePurpose);
+        return state;
+    }
     /** A failed initiative is not offered again until this tick, so one blocked need cannot loop. */
     private final Map<String, Long> initiativeCooldowns = new java.util.HashMap<>();
     private static final Set<String> INITIATIVES = Set.of("stock_blocks", "stock_wood", "rejoin_owner", "wander");
@@ -98,12 +120,13 @@ public final class NpcBrain {
         String prompt = kind.equals("risk")
             ? reason + "，有点危险。要我冒险过去吗？（回复“可以”或“不要”）"
             : reason + "。可以挖穿吗？（回复“可以”或“不要”）";
-        String fallback = kind.equals("risk") && npc.personality().equals("brave") ? "yes" : "no";
+        String fallback = "no";
         long now = npc.level().getGameTime();
         escalated = plan;
-        npc.speech().ask(new Communicator.Question(kind, prompt,
+        npc.speech().open(new Communicator.Question(kind, prompt,
             Communicator.yesNo("The owner agrees or permits it", "The owner refuses or wants it avoided"),
-            fallback, now + JevNpcMod.config().questionTimeoutTicks), now);
+            fallback, now + JevNpcMod.config().questionTimeoutTicks));
+        offerSpeech("permission_question", prompt);
         status = "WAITING_FOR_OWNER: " + kind;
         JevNpcMod.LOGGER.info("Jev question goal={} kind={} fallback={} plan={}", task.id, kind, fallback, plan.id());
         return true;
@@ -119,37 +142,15 @@ public final class NpcBrain {
         task.feedback("owner_permission", allowed, 0, (allowed ? "owner allowed " : "owner refused ") + question.kind() + " (" + source + ")");
         if (!allowed) {
             if (source.equals("new_instruction")) return;
-            npc.tellOwner(source.equals("timeout") ? "没等到答复，我先不这么做。" : "好，那我不这么做。");
+            offerSpeech("permission_result", source.equals("timeout") ? "没等到答复，我先不这么做。" : "好，那我不这么做。");
             event("owner_refused", "Owner refused " + question.kind() + "; choose another route or report", true);
             return;
         }
         task.grants.add(question.kind());
         task.failedTargets.remove(plan.id());
-        npc.tellOwner(source.equals("timeout") ? "没等到答复，我按自己的判断继续。" : "好的，我试试。");
+        // The accepted permission is sufficient; execution receipts report the actual result.
         activeStep = plan.id();
         npc.skills().start(plan, false);
-    }
-
-    /** Keywords first; then Jev, when configured, decides whether the reply answers the question or is a new instruction. */
-    private void answer(ServerPlayer player, String text) {
-        Communicator.Question question = npc.speech().pending().orElseThrow();
-        var keyword = Communicator.interpret(text);
-        if (keyword.isPresent()) { resolveQuestion(question, keyword.get(), "keyword"); return; }
-        NpcConfig config = JevNpcMod.config();
-        if (!config.enabled || config.effectiveKey().isBlank()) {
-            continueChat(player, text);
-            return;
-        }
-        long turn = conversationTurn;
-        var server = npc.getServer();
-        JevNpcMod.client().interpretReply(config.effectiveKey(), config.model, question.prompt(), question.options(), text, config.requestTimeoutMs)
-            .whenComplete((choice, failure) -> server.execute(() -> {
-                if (!server.isSameThread() || turn != conversationTurn || npc.speech().pending().orElse(null) != question) return;
-                if (failure == null && question.options().containsKey(choice)) resolveQuestion(question, choice, "jev");
-                else {
-                    continueChat(player, text);
-                }
-            }));
     }
 
     /** An undirected chat line from the owner counts as a reply only right after the NPC spoke or asked. */
@@ -174,15 +175,16 @@ public final class NpcBrain {
         ownerRequest = "";
         gate.invalidate();
         events.drain();
-        npc.tellOwner(message);
+        offerSpeech("goal_result", "关于请求“" + (lastTask.has("request") ? lastTask.get("request").getAsString() : "当前任务") + "”：" + message);
     }
 
     public NpcBrain(JevNpcEntity npc) { this.npc = npc; }
-    public String status() { return status; }
-    public void invalidate() { gate.invalidate(); conversationTurn++; }
+    public String status() { return status + (dialogue.pending() ? " | dialogue=" + dialogue.phase() : ""); }
+    public void invalidate() { gate.invalidate(); dialogue.clear(); }
     public void requestHandled() { if (task == null) ownerRequest = ""; }
     public void hold() {
-        conversationTurn++;
+        dialogue.clear();
+        queuedSpeech = null;
         held = true;
         task = null;
         environment = null;
@@ -213,24 +215,18 @@ public final class NpcBrain {
                 npc.getUUID(), player.getName().getString(), chatIgnoreReason(player), oneLine(text));
             return;
         }
-        conversationTurn++;
-        if (npc.speech().pending().isPresent()) {
-            answer(player, text);
-            return;
-        }
-        continueChat(player, text);
+        gate.invalidate();
+        dialogue.begin(DialogueSession.Mode.UNDERSTAND_PLAYER, text, "Understand and respond to this owner message", goalContext());
+        dialogueQuestion = npc.speech().pending().orElse(null);
+        dialogueAnchor = player.blockPosition().immutable();
+        dialogueFailures = 0;
+        nextDialogueTick = 0;
     }
 
-    private void continueChat(ServerPlayer player, String text) {
-        if (JevNpcMod.config().llmReady()) converse(player, text);
-        else startGoal(player, text);
-    }
-
-    private void startGoal(ServerPlayer player, String text) { startGoal(player, text, null, true); }
-
-    /** A known {@code intent} (from conversation) skips Jev's interpretation round. */
+    /** Starts an already accepted method. Player text must pass through dialogue routing and review first. */
     public void startGoal(ServerPlayer player, String text, GoalIntent intent, boolean acknowledge) {
-        conversationTurn++;
+        dialogue.clear();
+        java.util.Objects.requireNonNull(intent, "An accepted method is required");
         held = false;
         npc.speech().resolve();
         escalated = null;
@@ -244,53 +240,174 @@ public final class NpcBrain {
         ownerRequest = text;
         requestAnchor = player.blockPosition();
         npc.remember("Owner said: " + ownerRequest);
-        if (intent == null) event("owner_chat", ownerRequest, true);
-        else event("goal_interpreted", "Intent set from conversation; choose the next tool for the persistent goal", true);
+        event("goal_accepted", "Jev accepted the proposal; choose the next tool for the persistent goal", true);
         JevNpcMod.LOGGER.info("Jev owner message npc={} player={} text=\"{}\" intent={}",
             npc.getUUID(), player.getName().getString(), oneLine(ownerRequest), intent);
         if (acknowledge) npc.tellOwner("已收到指令，我会先判断目标，再观察环境并执行。");
     }
 
-    /**
-     * DeepSeek answers in chat and may hand over a goal. Only the newest message's reply is applied; if the call fails
-     * the message still reaches the Jev command path.
-     */
-    private void converse(ServerPlayer player, String text) {
-        NpcConfig config = JevNpcMod.config();
-        if (!JevNpcMod.llmBudget().acquire(monotonicMs(), config.llmMaxRequestsPerMinute)) {
-            JevNpcMod.LOGGER.info("DeepSeek skipped npc={} reason=local_rate_limit", npc.getUUID());
-            conversationFailed(player, text);
-            return;
-        }
-        long turn = conversationTurn;
-        var messages = conversation.messages(personalityText(), situation(), text);
-        var server = npc.getServer();
-        JevNpcMod.LOGGER.info("DeepSeek request npc={} model={} turn={} text=\"{}\"", npc.getUUID(), config.llmModel, turn, oneLine(text));
-        JevNpcMod.llm().chat(config.effectiveLlmKey(), config.llmModel, messages, config.llmTimeoutMs)
-            .whenComplete((reply, failure) -> server.execute(() -> {
-                if (!server.isSameThread() || turn != conversationTurn || npc.isRemoved() || !npc.isAlive()) return;
-                if (failure != null) {
-                    String code = JevClient.errorCode(failure);
-                    JevNpcMod.LOGGER.warn("DeepSeek result npc={} turn={} outcome=failed:{}", npc.getUUID(), turn, code);
-                    status = "LLM_" + code;
-                    conversationFailed(player, text);
-                    return;
-                }
-                JevNpcMod.LOGGER.info("DeepSeek result npc={} turn={} latencyMs={} promptTokens={} reply=\"{}\" taskRequest=\"{}\" intent={}",
-                    npc.getUUID(), turn, reply.elapsedMs(), reply.promptTokens(), oneLine(reply.say()), oneLine(reply.taskRequest()), reply.intent());
-                conversation.record(text, reply);
-                if (!reply.say().isEmpty()) npc.say(reply.say());
-                if (!reply.hasTask()) {
-                    npc.remember("Chatted with owner: " + text);
-                    return;
-                }
-                startGoal(player, reply.requestOr(text), reply.intent(), reply.say().isEmpty());
-            }));
+    /** Version of the execution evidence against which an amendment was proposed. */
+    private String goalContext() {
+        return task == null ? "none:" + (lastTask.has("id") ? lastTask.get("id").getAsString() : "initial") : task.id + ":" + task.revision + ":" + task.stageIndex + ":" + task.gathered
+            + ":" + task.delivered + ":" + task.actionSucceeded + ":" + task.collected.hashCode();
     }
 
-    private void conversationFailed(ServerPlayer player, String text) {
-        if (npc.speech().pending().isPresent()) npc.tellOwner("这次没能听明白，你可以再说一次。刚才的问题还在等你答复。");
-        else startGoal(player, text);
+    private void offerSpeech(String purpose, String fact) {
+        // Coalesce unsolicited notices; a player message always has priority.
+        if (dialogue.pending()) { queuedSpeech = new SpeechNotice(purpose, fact, npc.speech().pending().orElse(null)); return; }
+        dialogue.begin(DialogueSession.Mode.COMPOSE_SPEECH, fact, purpose, goalContext());
+        dialogueQuestion = npc.speech().pending().orElse(null);
+        dialogueFailures = 0;
+        nextDialogueTick = 0;
+    }
+
+    private void notice(String topic, String fact, int cooldown, long tick) {
+        if (tick < noticeCooldowns.getOrDefault(topic, 0L) || dialogue.pending()) return;
+        noticeCooldowns.put(topic, tick + cooldown);
+        offerSpeech(topic, fact);
+    }
+
+    private void dialogueFailed(String code) {
+        status = "DIALOGUE_" + code;
+        nextDialogueTick = npc.tickCount + 100;
+        if (++dialogueFailures < 3) return;
+        if (dialogue.request() != null && dialogue.request().mode() == DialogueSession.Mode.UNDERSTAND_PLAYER)
+            npc.tellOwner("这次交流未能完成（" + code + "），现有任务和待答问题保留，请稍后重试。");
+        if (dialogue.request() != null) {
+            lastDialogueId = dialogue.request().id();
+            lastDialoguePurpose = dialogue.request().purpose();
+        }
+        dialogue.clear();
+        lastDialogueOutcome = "failed:" + code;
+    }
+
+    /** One Jev lane shared with action selection; language generation runs asynchronously alongside the body. */
+    private boolean tickDialogue(ServerPlayer owner, NpcConfig config) {
+        if (!dialogue.pending() && queuedSpeech != null) {
+            SpeechNotice notice = queuedSpeech;
+            queuedSpeech = null;
+            if (!notice.purpose().equals("permission_question") || notice.question() == npc.speech().pending().orElse(null))
+                offerSpeech(notice.purpose(), notice.fact());
+        }
+        if (dialogue.pending() && dialogue.request().mode() == DialogueSession.Mode.COMPOSE_SPEECH
+            && dialogue.request().purpose().equals("permission_question")
+            && (dialogueQuestion == null || dialogueQuestion != npc.speech().pending().orElse(null))) dialogue.clear();
+        if (!dialogue.pending() || dialogue.phase() == DialogueSession.Phase.GENERATING) return false;
+        if (gate.inFlight() || npc.tickCount < nextDialogueTick) return true;
+        if (!config.enabled || config.effectiveKey().isBlank()) { dialogueFailed("JEV_UNAVAILABLE"); return true; }
+        if (!JevNpcMod.budget().acquire(monotonicMs(), config.maxRequestsPerMinute)) {
+            nextDialogueTick = npc.tickCount + 20;
+            return true;
+        }
+        DialogueSession.Request request = dialogue.request();
+        DialogueSession.Phase phase = dialogue.phase();
+        BlockPos sourceAnchor = dialogueAnchor;
+        boolean questionPending = dialogueQuestion != null && npc.speech().pending().orElse(null) == dialogueQuestion;
+        List<Candidate> choices = dialogue.options(config.llmReady(), questionPending);
+        JsonObject state = situation();
+        if (phase == DialogueSession.Phase.REVIEW && dialogue.reply().hasTask()) {
+            // Old completion reports are useful for conversation, but contaminate this new proposal's adoption check.
+            state.remove("last_goal");
+            state.remove("recent_speech");
+            state.remove("recent_memory");
+            state.remove("own_needs");
+            state.addProperty("proposal_is_unexecuted", true);
+        }
+        state.add("dialogue", dialogue.state());
+        state.add("available_methods", phase == DialogueSession.Phase.REVIEW && dialogue.reply().hasTask()
+            ? ToolCatalog.forPlan(dialogue.reply().plan()) : ToolCatalog.json());
+        DecisionGate.Ticket ticket = gate.begin(monotonicMs()).orElseThrow();
+        var server = npc.getServer();
+        JevNpcMod.LOGGER.info("Jev dialogue request npc={} event={} mode={} phase={} source=\"{}\"", npc.getUUID(),
+            request.id(), request.mode(), phase, oneLine(request.text()));
+        JevNpcMod.client().choose(config.effectiveKey(), config.model, state, choices,
+            dialogue.instructions(),
+            config.requestTimeoutMs).whenComplete((decision, failure) -> server.execute(() -> {
+                if (!server.isSameThread()) return;
+                boolean valid = gate.complete(ticket, monotonicMs(), config.maxResultAgeMs);
+                if (!dialogue.pending() || dialogue.request().id() != request.id() || dialogue.phase() != phase) return;
+                if (!valid || npc.isRemoved() || !npc.isAlive() || npc.owner() != owner || owner.level() != npc.level()
+                    || owner.distanceToSqr(npc) > 48 * 48) { nextDialogueTick = npc.tickCount + 20; return; }
+                if (failure != null || decision.confidence() < dialogue.minimumConfidence(decision.candidateId(), config.minimumConfidence)) {
+                    JevNpcMod.LOGGER.info("Jev dialogue unresolved npc={} event={} phase={} result={} confidence={}", npc.getUUID(), request.id(), phase,
+                        failure == null ? decision.candidateId() : JevClient.errorCode(failure), failure == null ? decision.confidence() : 0);
+                    dialogueFailed(failure == null ? "UNCERTAIN" : JevClient.errorCode(failure));
+                    return;
+                }
+                if (phase == DialogueSession.Phase.ROUTE) dialogueRoutes++; else dialogueReviews++;
+                JevNpcMod.LOGGER.info("Jev dialogue npc={} event={} phase={} decision={} latencyMs={} confidence={}",
+                    npc.getUUID(), request.id(), phase, decision.candidateId(), decision.elapsedMs(), decision.confidence());
+                boolean stillPending = dialogueQuestion != null && npc.speech().pending().orElse(null) == dialogueQuestion;
+                if (dialogue.options(config.llmReady(), stillPending).stream().noneMatch(c -> c.id().equals(decision.candidateId()))) {
+                    dialogueFailed("CONTEXT_CHANGED"); return;
+                }
+                DeepSeekClient.Reply reply = dialogue.reply();
+                DialogueSession.Effect effect = dialogue.select(decision.candidateId(), config.llmReady(), stillPending);
+                if (effect == DialogueSession.Effect.GENERATE) { generateDialogue(request, config); return; }
+                dialogue.clear();
+                lastDialogueId = request.id();
+                lastDialoguePurpose = request.purpose();
+                lastDialogueOutcome = decision.candidateId();
+                if (effect == DialogueSession.Effect.DROP && phase == DialogueSession.Phase.REVIEW
+                    && request.mode() == DialogueSession.Mode.UNDERSTAND_PLAYER) {
+                    npc.tellOwner("这次回复未能通过核对，请再说明一下；当前任务保持不变。");
+                } else if (effect == DialogueSession.Effect.REJECT) {
+                    npc.tellOwner("这份行动计划还不能确认符合你的要求，请补充目标或条件；当前任务保持不变。");
+                } else if (effect == DialogueSession.Effect.UNAVAILABLE) {
+                    npc.tellOwner("语言服务未启用，这次交流暂时无法完成。当前任务保持不变。");
+                } else if (effect == DialogueSession.Effect.ADOPT) {
+                    if (!request.contextId().equals(goalContext())) {
+                        npc.tellOwner("交流期间任务进度发生了变化，未采用旧计划。请再说明剩余需要我做的事。");
+                        lastDialogueOutcome = "stale_plan";
+                        return;
+                    }
+                    startGoal(owner, request.text(), reply.plan().stages().getFirst().method(), false);
+                    task.setPlan(reply.plan());
+                    if (sourceAnchor != null) requestAnchor = sourceAnchor;
+                } else if (effect == DialogueSession.Effect.STOP) {
+                    npc.skills().stop();
+                    hold();
+                    npc.tellOwner("已停止当前任务。");
+                } else if (effect == DialogueSession.Effect.YES || effect == DialogueSession.Effect.NO) {
+                    resolveQuestion(dialogueQuestion, effect == DialogueSession.Effect.YES ? "yes" : "no", "jev");
+                }
+                if (effect == DialogueSession.Effect.SEND || effect == DialogueSession.Effect.ADOPT) {
+                    // Sending a proposal's promise without adopting it would misrepresent execution.
+                    String speech = reply == null ? request.text() : reply.hasTask() && effect != DialogueSession.Effect.ADOPT
+                        ? "尚未采用这份行动计划，当前任务保持不变。" : reply.say();
+                    if (!speech.isBlank()) npc.say(speech);
+                    if (reply != null && request.mode() == DialogueSession.Mode.UNDERSTAND_PLAYER)
+                        conversation.record(request.text(), effect == DialogueSession.Effect.ADOPT ? reply : new DeepSeekClient.Reply(speech, null, "keep", "", 0, 0));
+                }
+            }));
+        return true;
+    }
+
+    /** This is the only DeepSeek entry point, reachable only after Jev selects consult_dialogue. */
+    private void generateDialogue(DialogueSession.Request request, NpcConfig config) {
+        if (!JevNpcMod.llmBudget().acquire(monotonicMs(), config.llmMaxRequestsPerMinute)) {
+            dialogue.generated(request.id(), new DeepSeekClient.Reply("语言服务暂时繁忙，当前任务保持不变。", null, "keep", "", 0, 0));
+            return;
+        }
+        JsonObject state = situation();
+        state.add("delegated_dialogue", dialogue.state());
+        var messages = conversation.messages(personalityText(), state, request.text());
+        var server = npc.getServer();
+        llmRequests++;
+        JevNpcMod.LOGGER.info("DeepSeek delegated npc={} event={} mode={} purpose={} goalContext={}",
+            npc.getUUID(), request.id(), request.mode(), request.purpose(), request.contextId());
+        JevNpcMod.llm().chat(config.effectiveLlmKey(), config.llmModel, messages, config.llmTimeoutMs, request.mode())
+            .whenComplete((reply, failure) -> server.execute(() -> {
+                if (!server.isSameThread() || npc.isRemoved() || !npc.isAlive()) return;
+                DeepSeekClient.Reply result = failure == null ? reply
+                    : new DeepSeekClient.Reply("这次没能完成交流，请稍后再试。当前任务和待答问题保持不变。", null, "keep", "", 0, 0);
+                if (dialogue.generated(request.id(), result)) {
+                    nextDialogueTick = 0;
+                    JevNpcMod.LOGGER.info("DeepSeek proposal npc={} event={} outcome={} latencyMs={} plan={}",
+                        npc.getUUID(), request.id(), failure == null ? "review_required" : JevClient.errorCode(failure),
+                        result.elapsedMs(), result.json());
+                }
+            }));
     }
 
     private String personalityText() {
@@ -306,9 +423,9 @@ public final class NpcBrain {
         JsonObject situation = new JsonObject();
         situation.addProperty("health", Math.round(npc.getHealth()) + "/" + Math.round(npc.getMaxHealth()));
         situation.addProperty("time", npc.level().isNight() ? "night" : "day");
-        situation.addProperty("weather", weather == null ? "unknown" : weather);
+        situation.addProperty("weather", npc.level().isThundering() ? "thunder" : npc.level().isRaining() ? "rain" : "clear");
         situation.addProperty("current_activity", npc.skills().summary());
-        situation.addProperty("current_goal", task == null ? "none" : task.request + (task.intent == null ? "" : " " + task.intent));
+        situation.add("current_goal", task == null ? new JsonObject() : task.state());
         situation.add("last_goal", lastTask.deepCopy());
         npc.speech().pending().ifPresent(question -> {
             JsonObject pending = new JsonObject();
@@ -337,10 +454,11 @@ public final class NpcBrain {
     }
 
     public void tick() {
-        if (held) return;
         NpcConfig config = JevNpcMod.config();
         ServerPlayer owner = npc.owner();
         if (owner == null || owner.level() != npc.level() || owner.distanceToSqr(npc) > 48 * 48) return;
+        boolean dialogueBusy = tickDialogue(owner, config);
+        if (held) return;
         long tick = npc.tickCount;
         if (tick % 40 == 0) notice();
         Communicator.Question waiting = npc.speech().pending().orElse(null);
@@ -348,7 +466,12 @@ public final class NpcBrain {
             npc.speech().expire(npc.level().getGameTime()).ifPresent(fallback -> resolveQuestion(waiting, fallback, "timeout"));
             return;
         }
+        if (!config.enabled || config.effectiveKey().isBlank()) {
+            status = "JEV_UNAVAILABLE: 新决策暂停，保留当前目标";
+            return;
+        }
         if (task != null) {
+            if (task.intent == null) { endGoal(false, "旧版未解释的任务需要重新确认，请再说一次目标。"); return; }
             task.elapsedTicks++;
             // A last allowed tool may still finish; round exhaustion is checked before the next HTTP call.
             if (task.elapsedTicks >= config.maxGoalTicks || task.failures >= 4) {
@@ -356,16 +479,16 @@ public final class NpcBrain {
                 endGoal(false, "这次任务未能完成，已达到时间或失败次数上限。");
                 return;
             }
-            if (npc.skills().emergencyLocked() || activeStep != null && npc.skills().hasTask()) return;
+            if (npc.skills().emergencyLocked()) return;
             if (activeStep != null && npc.skills().hasSuspendedTask()) {
                 npc.skills().resume();
                 return;
             }
-            if (activeStep != null) {
+            if (activeStep != null && !npc.skills().hasTask()) {
                 activeStep = null;
                 event("tool_interrupted", "Previous tool was interrupted; reassess the goal", true);
             }
-            if (!gate.inFlight() && task.exhausted(config.maxGoalRounds, config.maxGoalTicks)) {
+            if (activeStep == null && !gate.inFlight() && task.exhausted(config.maxGoalRounds, config.maxGoalTicks)) {
                 endGoal(task.canComplete(), task.canComplete() ? "任务已完成。" : "这次任务未能完成，已达到决策轮数上限。");
                 return;
             }
@@ -386,18 +509,9 @@ public final class NpcBrain {
             event("idle", "No owner goal and nothing running; consider the NPC's own needs in `drives`", false);
             lastAutonomyTick = tick;
         }
-        if (!events.ready(tick, config.eventDebounceTicks) || gate.inFlight() || tick < nextDecisionTick) return;
+        if (dialogueBusy || !events.ready(tick, config.eventDebounceTicks) || gate.inFlight() || tick < nextDecisionTick) return;
         if (task == null) needs = config.autonomyEnabled ? Drives.needs(driveState()).stream()
             .filter(need -> initiativeCooldowns.getOrDefault(need.action(), 0L) <= tick).toList() : List.of();
-        if (!config.enabled || config.effectiveKey().isBlank()) {
-            status = config.enabled ? "NO_KEY: 本地技能模式" : "DISABLED: 本地技能模式";
-            Map<String, String> skipped = events.drain();
-            JevNpcMod.LOGGER.info("Jev request skipped npc={} reason={} ownerRequest=\"{}\" events=[{}]",
-                npc.getUUID(), status, oneLine(ownerRequest), formatEvents(skipped));
-            if (idle && config.autonomyEnabled) chooseLocally();
-            else if (task != null && task.intent != null && activeStep == null && !npc.skills().hasTask()) chooseToolLocally();
-            return;
-        }
         long nowMs = monotonicMs();
         if (!JevNpcMod.budget().acquire(nowMs, config.maxRequestsPerMinute)) {
             status = "LOCAL_RATE_LIMIT: 等待预算";
@@ -464,25 +578,12 @@ public final class NpcBrain {
                 JevNpcMod.LOGGER.info("Jev result npc={} ownerRequest=\"{}\" decision={} outcome={} model={} latencyMs={} inputTokens={} confidence={}",
                     npc.getUUID(), requestText, decision.candidateId(), outcome, decision.model(),
                     decision.elapsedMs(), decision.inputTokens(), decision.confidence());
-                if (decision.intent() != null) JevNpcMod.LOGGER.info("Jev interpretation npc={} intent={} judgments={}",
-                    npc.getUUID(), decision.intent(), decision.diagnostics());
                 if (keep) {
                     status += " | kept current task";
-                    if (task != null && decision.intent() != null && !npc.skills().emergencyLocked()) {
-                        endGoal(false, "我还没确定这条指令的动作或目标，请补充一下要做什么、针对什么。");
-                        return;
-                    }
                     if (task != null) {
                         task.feedback("decision", false, 0, "uncertain or emergency");
                         event("retry_decision", "Reconsider uncertain decision using the observed evidence", false);
                     }
-                    return;
-                }
-                if (task != null && decision.intent() != null) {
-                    task.intent = decision.intent();
-                    if (task.intent.verb().equals("unsupported")) {
-                        endGoal(false, "这条指令超出了当前能力，或目标还不明确。可以让我去附近浅水、采集木头、挖地面、攻击指定生物、跟随或守卫。");
-                    } else event("goal_interpreted", "Choose the next tool for the persistent goal", false);
                     return;
                 }
                 ActionPlan plan = options.get(decision.candidateId());
@@ -497,11 +598,20 @@ public final class NpcBrain {
     }
 
     private void applyTool(ActionPlan plan) {
+        if (plan.id().startsWith("select_stage_")) {
+            task.selectStage(Integer.parseInt(plan.id().substring("select_stage_".length())));
+            environment = new EnvironmentTools(npc);
+            event("stage_selected", "Evaluate the selected stage and its dependencies using current observations", false);
+            return;
+        }
+        if (plan.id().startsWith("aux_") || plan.skill() == Skill.CONTINUE) {
+            npc.skills().start(plan, false);
+            return;
+        }
         switch (plan.skill()) {
             case OBSERVE -> {
                 environment.observe(task, requestAnchor == null ? npc.blockPosition() : requestAnchor);
                 JevNpcMod.LOGGER.info("Jev observation goal={} round={} result={}", task.id, task.rounds, environment.state());
-                if (environment.state().getAsJsonArray("targets").isEmpty()) npc.tellOwner(environment.unavailableMessage(task.gathered > 0));
                 event("observation_ready", "Search results available; choose the next tool", false);
             }
             case FINISH -> {
@@ -521,7 +631,7 @@ public final class NpcBrain {
     }
 
     public void resetAfterReload() {
-        conversationTurn++;
+        dialogue.clear();
         gate.invalidate();
         nextDecisionTick = 0;
         event("configuration_reloaded", "Re-evaluate current activity", false);
@@ -554,7 +664,17 @@ public final class NpcBrain {
     }
 
     public Map<String, ActionPlan> options() {
-        if (task != null) return environment.options(task, requestAnchor == null ? npc.blockPosition() : requestAnchor);
+        if (task != null) {
+            Map<String, ActionPlan> choices = activeStep != null && npc.skills().hasTask() ? new LinkedHashMap<>()
+                : environment.options(task, requestAnchor == null ? npc.blockPosition() : requestAnchor);
+            add(choices, "continue_current", Skill.CONTINUE, null, null, "", 1,
+                "Continue current physical work, or wait for conditions to improve. Do not restart the tool.");
+            if (npc.backpack().countItem(Items.BREAD) > 0 && npc.getHealth() < npc.getMaxHealth())
+                add(choices, "aux_eat", Skill.EAT, null, null, "", 1, "Eat carried bread to heal while keeping stage progress and current work.");
+            if (npc.backpack().countItem(Items.IRON_CHESTPLATE) > 0 && !npc.getItemBySlot(EquipmentSlot.CHEST).is(Items.IRON_CHESTPLATE))
+                add(choices, "aux_equip", Skill.EQUIP, null, null, "", 1, "Equip carried armor while keeping stage progress and current work.");
+            return choices;
+        }
         Map<String, ActionPlan> result = new LinkedHashMap<>();
         BlockPos anchor = requestAnchor == null ? npc.home() : requestAnchor;
         add(result, "continue_current", Skill.CONTINUE, null, null, "", 1, "Keep the current task and do not restart it. If idle, remain idle.");
@@ -626,72 +746,34 @@ public final class NpcBrain {
             mayGather && npc.skills().findWorkBlock(npc.blockPosition(), "log").isPresent());
     }
 
-    /** Without Jev, a goal whose intent is already known still advances by a fixed preference over the bound tools. */
-    private void chooseToolLocally() {
-        if (task.intent.verb().equals("attack")) {
-            endGoal(false, "没有启用 Jev，我无法可靠判断你指定的是哪个生物，先不攻击。请配置 Jev 后再试。");
-            return;
-        }
-        Map<String, ActionPlan> options = options();
-        List<ActionPlan> plans = List.copyOf(options.values());
-        ActionPlan plan = first(plans, Skill.FINISH)
-            .or(() -> task.intent.gathering() && task.gathered >= task.intent.amount() ? first(plans, Skill.GIVE) : Optional.empty())
-            .or(() -> plans.stream().filter(p -> p.skill() != Skill.OBSERVE && p.skill() != Skill.REPORT && p.skill() != Skill.GIVE).findFirst())
-            .or(() -> first(plans, Skill.OBSERVE))
-            .or(() -> first(plans, Skill.GIVE))
-            .orElse(options.get("cannot_complete"));
-        if (plan == null) return;
-        task.rounds++;
-        JevNpcMod.LOGGER.info("Jev goal local tool goal={} round={} tool={}", task.id, task.rounds, plan.id());
-        applyTool(plan);
-    }
-
-    private static Optional<ActionPlan> first(List<ActionPlan> plans, Skill skill) {
-        return plans.stream().filter(plan -> plan.skill() == skill).findFirst();
-    }
-
-    /** Without a model the most pressing weighted need wins, so autonomy never depends on a paid call. */
-    private void chooseLocally() {
-        var need = Drives.choose(needs, npc.personality());
-        if (need.isEmpty()) return;
-        String action = need.get().action();
-        ActionPlan plan = options().get(action);
-        if (plan == null) return;
-        JevNpcMod.LOGGER.info("Jev autonomy npc={} source=local need={} action={} urgency={}", npc.getUUID(), need.get().id(),
-            action, String.format(java.util.Locale.ROOT, "%.2f", Drives.weighted(need.get(), npc.personality())));
-        status = "AUTONOMY(local): " + action;
-        npc.skills().start(plan, plan.skill() == Skill.ATTACK || plan.skill() == Skill.FLEE);
-    }
-
     /** Things a player would mention unprompted. The communicator drops repeats and keeps remarks spaced out. */
     private void notice() {
-        Communicator speech = npc.speech();
         var level = npc.level();
         long now = level.getGameTime();
         long time = level.getDayTime() % 24000;
         if (time >= 12000 && time < 12600 && level.canSeeSky(npc.blockPosition())) {
             boolean farFromHome = npc.distanceToSqr(Vec3.atCenterOf(npc.home())) > 32 * 32;
-            speech.remark("nightfall", farFromHome ? "天快黑了，我们离家有点远，小心怪物。" : "天快黑了，怪物要出来了。", 12000, now);
+            notice("nightfall", farFromHome ? "天快黑了，我们离家有点远，小心怪物。" : "天快黑了，怪物要出来了。", 12000, now);
         }
         if (npc.getHealth() <= 12 && !npc.skills().emergencyLocked())
-            speech.remark("hurt", "我受伤了，血量只剩 " + Math.round(npc.getHealth()) + "。", 1200, now);
+            notice("hurt", "我受伤了，血量只剩 " + Math.round(npc.getHealth()) + "。", 1200, now);
         int free = 0;
         for (ItemStack stack : npc.backpack().getItems()) {
             if (stack.isEmpty()) free++;
             else if (stack.isDamageableItem() && stack.getDamageValue() >= stack.getMaxDamage() * 0.85)
-                speech.remark("tool:" + BuiltInRegistries.ITEM.getKey(stack.getItem()), stack.getHoverName().getString() + "快用坏了。", 6000, now);
+                notice("tool:" + BuiltInRegistries.ITEM.getKey(stack.getItem()), stack.getHoverName().getString() + "快用坏了。", 6000, now);
         }
         ItemStack held = npc.getMainHandItem();
         if (held.isDamageableItem() && held.getDamageValue() >= held.getMaxDamage() * 0.85)
-            speech.remark("tool:" + BuiltInRegistries.ITEM.getKey(held.getItem()), held.getHoverName().getString() + "快用坏了。", 6000, now);
-        if (free <= 3) speech.remark("backpack", "背包快满了，只剩 " + free + " 格。", 6000, now);
+            notice("tool:" + BuiltInRegistries.ITEM.getKey(held.getItem()), held.getHoverName().getString() + "快用坏了。", 6000, now);
+        if (free <= 3) notice("backpack", "背包快满了，只剩 " + free + " 格。", 6000, now);
         if (npc.tickCount % 200 == 0) {
             BlockPos center = npc.blockPosition();
             for (BlockPos cursor : BlockPos.betweenClosed(center.offset(-6, -4, -6), center.offset(6, 4, 6))) {
                 if (!level.hasChunkAt(cursor)) continue;
                 BlockState state = level.getBlockState(cursor);
                 if (!state.is(BlockTags.DIAMOND_ORES) && !state.is(BlockTags.EMERALD_ORES) || !exposed(cursor)) continue;
-                speech.remark("ore:" + cursor.asLong(), "我在 " + cursor.toShortString() + " 附近看到了" + state.getBlock().getName().getString() + "。",
+                notice("ore:" + cursor.asLong(), "我在 " + cursor.toShortString() + " 附近看到了" + state.getBlock().getName().getString() + "。",
                     Integer.MAX_VALUE, now);
                 break;
             }
@@ -727,7 +809,8 @@ public final class NpcBrain {
         state.addProperty("owner_request", ownerRequest.isBlank() ? "No new outstanding owner request" : ownerRequest);
         JsonObject observed = new JsonObject();
         observed.addProperty("health", npc.getHealth());
-        observed.addProperty("health_condition", npc.getHealth() <= 8 ? "critical" : npc.getHealth() < 20 ? "injured" : "healthy");
+        observed.addProperty("max_health", npc.getMaxHealth());
+        observed.addProperty("health_condition", npc.getHealth() <= 8 ? "critical" : npc.getHealth() < npc.getMaxHealth() ? "injured" : "healthy");
         observed.addProperty("weather", weather == null ? "unknown" : weather);
         observed.addProperty("standing_in_rain", npc.level().isRainingAt(npc.blockPosition()));
         observed.addProperty("owner_distance_blocks", Math.round(npc.distanceTo(npc.owner())));

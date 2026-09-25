@@ -49,6 +49,9 @@ class JevClientTest {
         assertEquals(2, question.getAsJsonObject("criteria").size());
         assertEquals("follow", result.candidateId());
         assertEquals(534, result.inputTokens());
+        result = client.choose("test-key-only", "jev-1.13.0", state, OPTIONS, "Review this specific dialogue proposal", 1000).get(3, TimeUnit.SECONDS);
+        assertEquals("follow", result.candidateId());
+        assertEquals("Review this specific dialogue proposal", payload.get().getAsJsonObject("questions").getAsJsonObject("next_action").get("instructions").getAsString());
     }
 
     @Test void rejectsUnknownActionEvenIfProviderReturnsIt() {
@@ -112,84 +115,18 @@ class JevClientTest {
         assertEquals("INVALID_KEY_FORMAT", JevClient.errorCode(error));
     }
 
-    @Test void interpretationIgnoresUnusedLowConfidenceBranches() {
-        String body = """
-            {"model":"jev-1.13.0","answers":{
-              "verb":{"type":"choice","choice":"go_to","confidence":0.9},
-              "place":{"type":"choice","choice":"water","confidence":0.8},
-              "amount":{"type":"choice","choice":"one","confidence":0.01},
-              "material":{"type":"choice","choice":"ground","confidence":0.01}
-            }}
-            """;
-        Decision decision = JevClient.parseIntent(body, 30);
-        assertEquals(0.8, decision.confidence());
-        assertEquals("water", decision.intent().place());
-        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseIntent(body.replace("water", "invented_coordinates"), 30));
-    }
-
-    @Test void interpretationUsesNoulProbabilityAndSelectedAmount() {
-        String body = """
-            {"model":"jev-1.13.0","answers":{
-              "verb":{"type":"choice","choice":"harvest","confidence":0.9},
-              "amount":{"type":"choice","choice":"a_few","confidence":0.8},
-              "amount_explicit":{"type":"noul","noul":0.99},
-              "deliver_to_owner":{"type":"noul","noul":0.5}
-            }}
-            """;
-        Decision decision = JevClient.parseIntent(body, 20);
-        assertEquals(4, decision.intent().amount());
-        assertTrue(decision.intent().deliverToOwner());
-        assertEquals(0.8, decision.confidence());
-        assertFalse(JevClient.parseIntent(body.replace("0.5", "0.2"), 20).intent().deliverToOwner());
-        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseIntent(body.replace("0.5", "2.5"), 20));
-    }
-
-    @Test void initialGoalUsesTypedQuestionsThenToolResultsReachNextRequest() {
-        AgentTask task = new AgentTask("去水里");
-        JsonObject state = new JsonObject();
+    @Test void goalStateNeverTriggersALegacyRestrictedIntentClassifier() {
+        var state = new JsonObject();
+        var task = new AgentTask("挖十二块圆石然后回家");
         state.add("task", task.state());
-        var initial = JevClient.payload("jev-1.13.0", state, List.of());
-        assertTrue(initial.getAsJsonObject("questions").has("verb"));
-        assertFalse(initial.getAsJsonObject("questions").has("next_action"));
-        task.intent = new GoalIntent("go_to", "log", "water", 1, false);
-        task.feedback("observe_nearby", true, 1, "water_1 at observed coordinates");
+        var payload = JevClient.payload("jev-1.13.0", state, OPTIONS);
+        assertEquals(1, payload.getAsJsonObject("questions").size());
+        assertTrue(payload.getAsJsonObject("questions").has("next_action"));
+        assertFalse(payload.getAsJsonObject("questions").has("amount"));
+        task.feedback("mine", true, 12, "actual drops collected");
         state.add("task", task.state());
-        var next = JevClient.payload("jev-1.13.0", state, List.of(new Candidate("water_1", "Go to observed water")));
-        assertTrue(next.getAsJsonObject("questions").has("next_action"));
-        assertEquals(1, next.getAsJsonObject("state").getAsJsonObject("task").getAsJsonArray("tool_results").size());
-    }
-
-    @Test void absentQuantityCannotInvalidateClearlyUnderstoodDigRequest() {
-        // Reproduced live for 挖地面: verb/material=1.0, amount=unsupported with confidence 0.23.
-        String body = """
-            {"model":"jev-1.13.0","answers":{
-              "verb":{"type":"choice","choice":"mine","confidence":1.0},
-              "material":{"type":"choice","choice":"ground","confidence":1.0},
-              "amount":{"type":"choice","choice":"unsupported","confidence":0.23},
-              "amount_explicit":{"type":"noul","noul":0.01},
-              "deliver_to_owner":{"type":"noul","noul":0.8}
-            }}
-            """;
-        var decision = JevClient.parseIntent(body, 10);
-        assertEquals("mine", decision.intent().verb());
-        assertEquals(1, decision.intent().amount());
-        assertEquals(1.0, decision.confidence());
-        assertEquals("unsupported", JevClient.parseIntent(body.replace("0.01", "0.99"), 10).intent().verb());
-    }
-
-    @Test void replyInterpretationFallsBackToOtherWhenUnsureOrUnknown() {
-        var options = Communicator.yesNo("The owner agrees", "The owner refuses");
-        var payload = JevClient.replyPayload("jev-1.13.0", "要冒险吗？", options, "你看着办");
-        var question = payload.getAsJsonObject("questions").getAsJsonObject("answer");
-        assertEquals(3, question.getAsJsonObject("criteria").size(), "yes, no and other");
-        assertEquals("你看着办", payload.getAsJsonObject("state").get("owner_reply").getAsString());
-        String body = """
-            {"model":"jev-1.13.0","answers":{"answer":{"type":"choice","choice":"yes","confidence":0.8}}}
-            """;
-        assertEquals("yes", JevClient.parseReply(body, options));
-        assertEquals("other", JevClient.parseReply(body.replace("0.8", "0.3"), options), "unsure answers are not consent");
-        assertEquals("other", JevClient.parseReply(body.replace("\"yes\"", "\"other\""), options));
-        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseReply("{}", options));
+        assertEquals(12, JevClient.payload("jev-1.13.0", state, OPTIONS).getAsJsonObject("state")
+            .getAsJsonObject("task").getAsJsonArray("tool_results").get(0).getAsJsonObject().get("progress").getAsInt());
     }
 
     private JevClient localClient() { return new JevClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/systemone")); }

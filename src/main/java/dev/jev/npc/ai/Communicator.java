@@ -78,6 +78,8 @@ public final class Communicator {
     /** Only lines actually sent, including observations and permission questions. */
     public List<String> recent() { return List.copyOf(recent); }
 
+    public void open(Question question) { pending = question; }
+
     public void ask(Question question, long tick) {
         pending = question;
         tell(question.prompt(), tick);

@@ -52,47 +52,52 @@ class DeepSeekClientTest {
         client = new DeepSeekClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/chat/completions"));
     }
 
-    @Test void sendsJsonModeWithoutThinkingAndReadsAValidatedGoal() throws Exception {
+    static String planJson() {
+        return """
+            {"objective":"交付十二块圆石后回家","constraints":["受伤先治疗"],"completion":"交付十二块圆石并到家",
+             "stages":[{"purpose":"采集十二块圆石交给主人","tool":"mine","material":"stone","amount":12,"deliver_to_owner":true},
+                       {"purpose":"回家","tool":"go_to","place":"home"}]}
+            """;
+    }
+
+    @Test void sendsJsonModeWithoutThinkingAndReadsAnOpenComposedGoal() throws Exception {
         AtomicReference<String> auth = new AtomicReference<>();
         AtomicReference<JsonObject> payload = new AtomicReference<>();
-        serve(200, completion("""
-            {"reply":"好嘞，我去砍几块木头给你。","action":"task","task_request":"砍四块原木交给主人",
-             "intent":{"verb":"harvest","material":"log","place":"owner","amount":4,"deliver_to_owner":true}}
-            """), auth, payload);
-        var messages = new Conversation().messages("谨慎", new JsonObject(), "帮我砍点木头");
-        var reply = client.chat("ds-test-key", "deepseek-flash", messages, 2000).get(3, TimeUnit.SECONDS);
+        serve(200, completion("{\"reply\":\"好，我去采集十二块圆石给你，再回家。\",\"goal_change\":\"replace\",\"plan\":" + planJson() + "}"), auth, payload);
+        var reply = client.chat("ds-test-key", "deepseek-flash", new Conversation().messages("谨慎", new JsonObject(), "拿十二块圆石再回家"), 2000).get(3, TimeUnit.SECONDS);
         assertEquals("Bearer ds-test-key", auth.get());
         assertEquals("json_object", payload.get().getAsJsonObject("response_format").get("type").getAsString());
         assertEquals("disabled", payload.get().getAsJsonObject("thinking").get("type").getAsString());
-        assertEquals("system", payload.get().getAsJsonArray("messages").get(0).getAsJsonObject().get("role").getAsString());
-        assertTrue(payload.get().getAsJsonArray("messages").get(0).getAsJsonObject().get("content").getAsString().contains("json"),
-            "JSON Output requires the word json in the prompt");
-        assertEquals("好嘞，我去砍几块木头给你。", reply.say());
-        assertEquals(new GoalIntent("harvest", "log", "owner", 4, true), reply.intent());
+        assertTrue(payload.get().getAsJsonArray("messages").get(0).getAsJsonObject().get("content").getAsString().contains("json"));
+        assertEquals(12, reply.plan().stages().getFirst().method().amount());
+        assertEquals(2, reply.plan().stages().size());
         assertEquals(321, reply.promptTokens());
     }
 
     @Test void chatOnlyRepliesCarryNoGoal() {
-        var reply = DeepSeekClient.parse(completion("{\"reply\":\"今天天气不错。\",\"action\":\"none\",\"intent\":null}"), 5);
+        var reply = DeepSeekClient.parse(completion("{\"reply\":\"今天天气不错。\",\"goal_change\":\"keep\"}"), 5);
         assertFalse(reply.hasTask());
-        assertEquals("今天天气不错。", reply.say());
     }
 
-    @Test void inventedIntentFallsBackToTheRestatedRequestForJev() {
-        var reply = DeepSeekClient.parse(completion("""
-            {"reply":"好的","action":"task","task_request":"挖十块钻石",
-             "intent":{"verb":"mine","material":"diamond","amount":10}}
-            """), 5);
-        assertNull(reply.intent(), "unsupported material and amount must not become a goal");
-        assertEquals("挖十块钻石", reply.taskRequest());
-        assertTrue(reply.hasTask());
+    @Test void inventedToolsOrParametersCannotBecomeExecutablePlans() {
+        for (String invalid : List.of(planJson().replace("stone", "diamond"), planJson().replace("mine", "teleport"),
+            planJson().replace(":12", ":-2"), planJson().replace(":12", ":12.5"), planJson().replace(":12", ":257"))) {
+            assertThrows(JevClient.JevFailure.class, () -> DeepSeekClient.parse(completion("{\"reply\":\"好的\",\"goal_change\":\"replace\",\"plan\":" + invalid + "}"), 5));
+        }
+    }
+
+    @Test void speechModeDiscardsPlansAndPermissionEvenWhenProviderViolatesProtocol() {
+        var reply = DeepSeekClient.parse(completion("{\"reply\":\"天黑了\",\"goal_change\":\"replace\",\"answer\":\"yes\",\"plan\":" + planJson() + "}"), 5, DialogueSession.Mode.COMPOSE_SPEECH);
+        assertNull(reply.plan());
+        assertEquals("keep", reply.change());
+        assertEquals("", reply.answer());
     }
 
     @Test void replyIsOneBoundedChatLineWithoutFormattingCodes() {
         String longText = "§c第一行\n第二行" + "很".repeat(400);
         JsonObject answer = new JsonObject();
         answer.addProperty("reply", longText);
-        answer.addProperty("action", "none");
+        answer.addProperty("goal_change", "keep");
         var reply = DeepSeekClient.parse(completion(answer.toString()), 5);
         assertFalse(reply.say().contains("\n") || reply.say().contains("§"));
         assertEquals(DeepSeekClient.MAX_REPLY_CHARS, reply.say().length());
@@ -116,40 +121,21 @@ class DeepSeekClientTest {
 
     @Test void conversationKeepsOnlyRecentTurns() {
         var conversation = new Conversation();
-        for (int i = 0; i < 10; i++) conversation.record("问题" + i, new DeepSeekClient.Reply("回答" + i, "", null, 0, 0));
+        for (int i = 0; i < 10; i++) conversation.record("问题" + i, new DeepSeekClient.Reply("回答" + i, null, "keep", "", 0, 0));
         var messages = conversation.messages("谨慎", new JsonObject(), "最新");
         assertEquals(1 + Conversation.MAX_MESSAGES + 1, messages.size());
         assertEquals("问题6", messages.get(1).content());
         assertEquals("最新", messages.getLast().content());
     }
 
-    @Test void conversationHistoryPreservesJsonActionAndIntent() {
+    @Test void conversationHistoryPreservesTheAcceptedProposal() {
         var conversation = new Conversation();
-        var reply = new DeepSeekClient.Reply("好，我去打那只铁傀儡。", "攻击附近的铁傀儡",
-            new GoalIntent("attack", "log", "owner", 1, false), 321, 5);
-        conversation.record("好啊", reply);
-        var messages = conversation.messages("谨慎", new JsonObject(), "为什么？");
-        var previous = JsonParser.parseString(messages.get(2).content()).getAsJsonObject();
-        assertEquals("task", previous.get("action").getAsString());
-        assertEquals("攻击附近的铁傀儡", previous.get("task_request").getAsString());
-        assertEquals("attack", previous.getAsJsonObject("intent").get("verb").getAsString());
-        assertFalse(previous.getAsJsonObject("intent").get("deliver_to_owner").getAsBoolean());
-        assertEquals(reply, DeepSeekClient.parse(completion(previous.toString()), 5),
-            "history should use the same schema as model output, except usage metadata");
-    }
-
-    @Test void contextualTaskUsesRestatementEvenWhenIntentIsValid() {
-        var reply = new DeepSeekClient.Reply("我来。", "攻击铁傀儡", new GoalIntent("attack", "log", "owner", 1, false), 0, 0);
-        assertEquals("攻击铁傀儡", reply.requestOr("好啊"));
-        assertEquals("跟着我", new DeepSeekClient.Reply("", "", new GoalIntent("follow", "log", "owner", 1, false), 0, 0).requestOr("跟着我"));
-    }
-
-    @Test void conversationalHistoryExplicitlyKeepsNoAction() {
-        var conversation = new Conversation();
-        conversation.record("为什么？", new DeepSeekClient.Reply("因为路线穿过木板墙。", "", null, 0, 0));
-        var previous = JsonParser.parseString(conversation.messages("谨慎", new JsonObject(), "嗯").get(2).content()).getAsJsonObject();
-        assertEquals("none", previous.get("action").getAsString());
-        assertTrue(previous.get("intent").isJsonNull());
+        var plan = GoalPlan.parse(JsonParser.parseString(planJson()).getAsJsonObject());
+        var reply = new DeepSeekClient.Reply("好的", plan, "replace", "", 0, 0);
+        conversation.record("去吧", reply);
+        var previous = JsonParser.parseString(conversation.messages("谨慎", new JsonObject(), "为什么？").get(2).content()).getAsJsonObject();
+        assertEquals("replace", previous.get("goal_change").getAsString());
+        assertEquals(plan.json(), previous.getAsJsonObject("plan"));
     }
 
     @Test void goalIntentValidationFollowsVerbSpecificFields() {

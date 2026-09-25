@@ -223,25 +223,19 @@ public final class NpcGameTests implements FabricGameTest {
     }
 
     @GameTest(template = EMPTY_STRUCTURE)
-    public void newOwnerRequestReplacesOldGoalAndBudgetTerminatesLoop(GameTestHelper helper) {
+    public void playerMessageQueuesWithoutReplacingOrStoppingPhysicalWork(GameTestHelper helper) {
         var fixture = fixture(helper);
         var npc = fixture.npc();
-        npc.brain().chat(fixture.owner(), "帮我收集木头");
+        npc.brain().startGoal(fixture.owner(), "跟随我", new GoalIntent("follow", "log", "owner", 1, false), false);
         String firstId = npc.brain().taskState().get("id").getAsString();
         npc.skills().start(task(Skill.FOLLOW, null, 1), false);
-        npc.brain().chat(fixture.owner(), "去水里");
-        helper.assertFalse(npc.skills().hasTask(), "new owner goal must stop previous execution");
-        helper.assertTrue(!firstId.equals(npc.brain().taskState().get("id").getAsString()), "new request must have a fresh identity");
-        helper.assertTrue(npc.brain().taskState().get("request").getAsString().equals("去水里"), "new goal replaces old request");
-        var exhausted = new AgentTask("去水里");
-        exhausted.rounds = JevNpcMod.config().maxGoalRounds;
-        var saved = new CompoundTag();
-        saved.putString("agentTask", exhausted.save());
-        saved.putString("ownerRequest", exhausted.request);
-        npc.brain().load(saved);
+        npc.brain().chat(fixture.owner(), "为什么？");
+        helper.assertTrue(npc.skills().hasTask(), "chat must not interrupt physical execution");
+        helper.assertTrue(firstId.equals(npc.brain().taskState().get("id").getAsString()), "no proposal has been adopted yet");
+        helper.assertTrue(npc.brain().dialogueState().get("phase").getAsString().equals("ROUTE"), "message first waits for Jev routing");
         npc.brain().tick();
-        helper.assertFalse(npc.brain().hasGoal(), "exhausted loop must end without another model call");
-        helper.assertTrue(npc.brain().taskState().get("outcome").getAsString().equals("incomplete"), "budget stop must not claim success");
+        helper.assertTrue(npc.brain().dialogueState().get("llm_requests").getAsInt() == 0, "no DeepSeek fallback when Jev is off");
+        npc.brain().hold();
         helper.succeed();
     }
     @GameTest(template = EMPTY_STRUCTURE)
@@ -263,17 +257,17 @@ public final class NpcGameTests implements FabricGameTest {
     }
 
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
-    public void knownIntentGathersAndDeliversWithoutModels(GameTestHelper helper) {
+    public void knownGoalPausesWithoutJevInsteadOfFallingBackToLanguageOrLocalPolicy(GameTestHelper helper) {
         var fixture = fixture(helper);
         var npc = fixture.npc();
         helper.setBlock(3, 1, 3, Blocks.OAK_LOG);
-        helper.setBlock(3, 2, 3, Blocks.OAK_LEAVES);
         npc.brain().startGoal(fixture.owner(), "采集一块原木并交给我", new GoalIntent("harvest", "log", "owner", 1, true), false);
-        helper.succeedWhen(() -> {
-            helper.assertFalse(npc.brain().hasGoal(), "local goal must finish");
-            helper.assertTrue(npc.brain().taskState().get("outcome").getAsString().equals("completed"), "local goal must succeed");
-            helper.assertTrue(fixture.owner().getInventory().countItem(Items.OAK_LOG) == 1, "gathered log must reach the owner");
-            helper.assertTrue(npc.backpack().countItem(Items.OAK_PLANKS) == 32, "starter materials must be retained");
+        helper.runAfterDelay(40, () -> {
+            helper.assertTrue(npc.brain().hasGoal(), "goal is preserved while Jev is unavailable");
+            helper.assertBlockPresent(Blocks.OAK_LOG, new BlockPos(3, 1, 3));
+            helper.assertTrue(npc.brain().dialogueState().get("llm_requests").getAsInt() == 0, "no language fallback");
+            npc.brain().hold();
+            helper.succeed();
         });
     }
 
@@ -287,10 +281,9 @@ public final class NpcGameTests implements FabricGameTest {
         golem.setNoAi(true);
         npc.brain().startGoal(fixture.owner(), "打铁傀儡", new GoalIntent("attack", "log", "owner", 1, false), false);
         helper.runAfterDelay(40, () -> {
-            helper.assertFalse(npc.brain().hasGoal(), "attack must terminate without a target selector");
-            helper.assertTrue(npc.brain().taskState().get("outcome").getAsString().equals("incomplete"), "refusal must not claim success");
+            helper.assertTrue(npc.brain().hasGoal(), "attack goal must pause without the Jev target selector");
             helper.assertTrue(villager.getHealth() == villager.getMaxHealth() && golem.getHealth() == golem.getMaxHealth(), "no nearby creature may be attacked");
-            helper.assertTrue(npc.speech().recent().stream().anyMatch(line -> line.contains("无法可靠判断")), "owner must know why attack was refused");
+            helper.assertTrue(npc.brain().status().contains("JEV_UNAVAILABLE"), "status must explain the paused decision");
             npc.brain().hold();
             helper.succeed();
         });
@@ -406,7 +399,7 @@ public final class NpcGameTests implements FabricGameTest {
     }
 
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 600)
-    public void npcAsksBeforeBreakingBuiltBlocksAndDigsOnceAllowed(GameTestHelper helper) {
+    public void permissionAnswerWaitsForJevAndPersistedGrantAllowsDigging(GameTestHelper helper) {
         var fixture = fixture(helper);
         var npc = fixture.npc();
         for (int x = 0; x <= 2; x++) for (int y = 0; y <= 3; y++) for (int z = 2; z <= 4; z++)
@@ -424,8 +417,14 @@ public final class NpcGameTests implements FabricGameTest {
                 "the NPC must ask before breaking built blocks");
             helper.assertBlockPresent(Blocks.OAK_PLANKS, new BlockPos(2, 1, 3));
             npc.brain().chat(fixture.owner(), "可以，挖吧");
-            helper.assertTrue(npc.speech().pending().isEmpty(), "the answer closes the question");
-            helper.assertTrue(npc.brain().grants().contains("break_built"), "permission is granted for this goal");
+            helper.assertTrue(npc.speech().pending().isPresent(), "without Jev, chat alone cannot grant permission");
+            helper.assertTrue(npc.brain().grants().isEmpty(), "no local keyword permission shortcut");
+            // Exercise execution after a persisted grant; live routing/acceptance is covered by client validation.
+            goal.grants.add("break_built");
+            brain.putString("agentTask", goal.save());
+            npc.brain().load(brain);
+            npc.speech().resolve();
+            npc.skills().start(move(destination), false);
         });
         helper.succeedWhen(() -> {
             helper.assertTrue(npc.distanceToSqr(Vec3.atBottomCenterOf(destination)) < 2.5, "must dig out once allowed");
@@ -452,12 +451,16 @@ public final class NpcGameTests implements FabricGameTest {
     }
 
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 800)
-    public void idleNpcWithoutKeyStocksBuildingBlocksOnItsOwn(GameTestHelper helper) {
+    public void idleNpcWithoutJevDoesNotInventAutonomousDecisions(GameTestHelper helper) {
         var npc = fixture(helper).npc();
         for (int x = 4; x <= 6; x++) for (int z = 4; z <= 6; z++) helper.setBlock(x, 1, z, Blocks.DIRT);
         npc.brain().wake();
-        helper.succeedWhen(() -> helper.assertTrue(npc.backpack().countItem(Items.DIRT) >= 4,
-            "an idle diligent NPC must dig its own building blocks without any model call"));
+        helper.runAfterDelay(40, () -> {
+            helper.assertTrue(npc.backpack().countItem(Items.DIRT) == 0, "without Jev autonomy waits instead of using a fixed policy");
+            helper.assertBlockPresent(Blocks.DIRT, new BlockPos(4, 1, 4));
+            npc.brain().hold();
+            helper.succeed();
+        });
     }
 
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
