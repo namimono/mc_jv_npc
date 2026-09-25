@@ -1,7 +1,12 @@
 package dev.jev.npc.behavior;
 
 import dev.jev.npc.JevNpcMod;
+import dev.jev.npc.config.NpcConfig;
 import dev.jev.npc.entity.JevNpcEntity;
+import dev.jev.npc.navigation.NavGoal;
+import dev.jev.npc.navigation.NavOutcome;
+import dev.jev.npc.navigation.NavPolicy;
+import dev.jev.npc.navigation.Navigator;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -28,13 +33,15 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
-/** Owns navigation, work progress and interruption. It never calls a language model. */
+/** Owns work progress and interruption; all movement goes through the {@link Navigator}. It never calls a language model. */
 public final class SkillRunner {
     private final JevNpcEntity npc;
+    private final Navigator navigator;
     private Task active;
     private Task suspended;
     private String lastOutcome = "idle";
@@ -49,11 +56,11 @@ public final class SkillRunner {
         int workTicks;
         int clearedLeaves;
         int leafTicks;
+        int settleTicks;
         BlockPos clearingTarget;
         BlockPos approachTarget;
         BlockPos blockTarget;
-        Vec3 approach;
-        Vec3 lastPosition;
+        List<BlockPos> spots = List.of();
         final Set<BlockPos> skipped = new HashSet<>();
         Task(ActionPlan plan) { this.plan = plan; }
         CompoundTag save() {
@@ -72,7 +79,11 @@ public final class SkillRunner {
         }
     }
 
-    public SkillRunner(JevNpcEntity npc) { this.npc = npc; }
+    public SkillRunner(JevNpcEntity npc) {
+        this.npc = npc;
+        this.navigator = new Navigator(npc);
+    }
+    public Navigator navigator() { return navigator; }
     public String summary() {
         return active == null ? "idle (" + lastOutcome + ")" : active.plan.skill() + " " + active.progress + "/" + active.plan.count();
     }
@@ -103,7 +114,7 @@ public final class SkillRunner {
             suspended = active;
         } else if (!preserveCurrent) suspended = null;
         clearCracks();
-        npc.getNavigation().stop();
+        navigator.stop();
         active = new Task(plan);
         lastOutcome = "running";
         npc.tellOwner(switch (plan.skill()) {
@@ -133,19 +144,18 @@ public final class SkillRunner {
         active = null;
         suspended = null;
         emergencyUntil = 0;
-        npc.getNavigation().stop();
+        navigator.stop();
         lastOutcome = "cancelled by owner";
     }
 
     public void resume() {
         if (suspended == null) return;
         clearCracks();
-        npc.getNavigation().stop();
+        navigator.stop();
         active = suspended;
         suspended = null;
         active.blockedTicks = 0;
         active.workTicks = 0;
-        active.lastPosition = null;
         npc.tellOwner("恢复任务：" + active.plan.description());
     }
 
@@ -166,13 +176,13 @@ public final class SkillRunner {
         // Do not operate on a world for an absent owner, including after reload/dimension changes.
         ServerPlayer owner = npc.owner();
         if (owner == null || owner.level() != npc.level() || owner.distanceToSqr(npc) > 64 * 64) {
-            npc.getNavigation().stop();
+            navigator.stop();
             return;
         }
         active.ticks++;
         if (isWork(active.plan.skill()) && active.ticks > 2400) { finish(false, "任务超时"); return; }
         switch (active.plan.skill()) {
-            case WAIT -> npc.getNavigation().stop();
+            case WAIT -> navigator.stop();
             case FOLLOW -> follow();
             case MOVE, FLEE -> move();
             case GUARD -> guard();
@@ -189,25 +199,30 @@ public final class SkillRunner {
     private void follow() {
         ServerPlayer owner = npc.owner();
         if (npc.distanceToSqr(owner) <= 3 * 3) {
-            npc.getNavigation().stop();
-            active.blockedTicks = 0;
+            navigator.stop();
             npc.getLookControl().setLookAt(owner, 30, 30);
-        } else navigate(owner.position(), 1.05);
+        } else if (travel(NavGoal.near(owner.blockPosition(), 2), policy(), 1.05) == Navigator.Status.FAILED) retryLater();
     }
 
     private void move() {
-        if (active.plan.position() == null) { finish(false, "没有目的地"); return; }
-        Vec3 target = Vec3.atBottomCenterOf(active.plan.position());
+        BlockPos destination = active.plan.position();
+        if (destination == null) { finish(false, "没有目的地"); return; }
+        Vec3 target = Vec3.atBottomCenterOf(destination);
         boolean water = active.plan.argument().equals("water");
-        if (water && !npc.level().getFluidState(active.plan.position()).is(FluidTags.WATER)) {
+        if (water && !npc.level().getFluidState(destination).is(FluidTags.WATER)) {
             finish(false, "目标位置已经没有水"); return;
         }
         double horizontalDistance = Math.pow(npc.getX() - target.x, 2) + Math.pow(npc.getZ() - target.z, 2);
-        if (water ? horizontalDistance < 0.09 && npc.isInWater() : npc.distanceToSqr(target) < 2.5) {
-            if (active.plan.skill() == Skill.FLEE && emergencyLocked()) { npc.getNavigation().stop(); return; }
+        boolean flee = active.plan.skill() == Skill.FLEE;
+        boolean arrived = water ? horizontalDistance < 0.09 && npc.isInWater() : npc.onGround() && npc.distanceToSqr(target) < 2.5;
+        if (arrived) {
+            if (flee && emergencyLocked()) { navigator.stop(); return; }
             npc.setDeltaMovement(0, npc.getDeltaMovement().y, 0);
             finish(true, "已到达目的地");
-        } else navigate(target, active.plan.skill() == Skill.FLEE ? 1.35 : 1.0);
+            return;
+        }
+        NavGoal goal = water ? NavGoal.exact(destination) : NavGoal.near(destination, 1);
+        if (travel(goal, flee ? walking() : policy(), flee ? 1.35 : 1.0) == Navigator.Status.FAILED) navigationFailed();
     }
 
     private void guard() {
@@ -217,11 +232,8 @@ public final class SkillRunner {
         if (enemy != null && enemy.distanceToSqr(Vec3.atCenterOf(anchor)) <= 12 * 12) {
             combat(enemy);
         } else if (npc.distanceToSqr(Vec3.atBottomCenterOf(anchor)) > 2.5) {
-            navigate(Vec3.atBottomCenterOf(anchor), 1);
-        } else {
-            active.blockedTicks = 0;
-            npc.getNavigation().stop();
-        }
+            if (travel(NavGoal.near(anchor, 1), policy(), 1) == Navigator.Status.FAILED) retryLater();
+        } else navigator.stop();
     }
 
     private void attack() {
@@ -235,13 +247,15 @@ public final class SkillRunner {
         equip(Items.IRON_SWORD, EquipmentSlot.MAINHAND);
         npc.getLookControl().setLookAt(target, 30, 30);
         if (npc.distanceToSqr(target) <= 2.5 * 2.5 && npc.hasLineOfSight(target)) {
-            npc.getNavigation().stop();
-            active.blockedTicks = 0;
+            navigator.stop();
             if (active.ticks % 20 == 0) {
                 npc.swing(InteractionHand.MAIN_HAND);
                 npc.doHurtTarget(target);
             }
-        } else navigate(target.position(), 1.15);
+        } else if (travel(NavGoal.near(target.blockPosition(), 1), walking(), 1.15) == Navigator.Status.FAILED) {
+            if (active.plan.skill() == Skill.ATTACK) finish(false, "够不到攻击目标");
+            else retryLater();
+        }
     }
 
     public LivingEntity nearestEnemy(double radius) {
@@ -269,7 +283,7 @@ public final class SkillRunner {
     }
 
     public boolean isWorkTarget(BlockPos position, String material) {
-        return observedWorkTarget(position, material) && canChange(position);
+        return observedWorkTarget(position, material) && mayModify(position);
     }
 
     /** Physical discovery is independent of line of sight, reachability and modification permission. */
@@ -292,18 +306,17 @@ public final class SkillRunner {
     private void skipWorkBlock() {
         clearCracks();
         if (active.blockTarget != null) {
-            JevNpcMod.LOGGER.info("Jev work skip target={} npcPosition={} approach={}", active.blockTarget.toShortString(), npc.position(), active.approach);
+            JevNpcMod.LOGGER.info("Jev work skip target={} npcPosition={} spots={}", active.blockTarget.toShortString(), npc.position(), active.spots.size());
             active.skipped.add(active.blockTarget);
         }
         active.blockTarget = null;
-        active.approach = null;
+        active.spots = List.of();
         active.approachTarget = null;
         active.clearingTarget = null;
         active.leafTicks = 0;
         active.workTicks = 0;
         active.blockedTicks = 0;
-        active.lastPosition = null;
-        npc.getNavigation().stop();
+        navigator.stop();
     }
 
     private boolean hasLeavesNearby(BlockPos position) {
@@ -321,7 +334,7 @@ public final class SkillRunner {
         return false;
     }
 
-    private boolean canChange(BlockPos position) {
+    public boolean mayModify(BlockPos position) {
         ServerPlayer owner = npc.owner();
         return JevNpcMod.config().allowBlockChanges && npc.level().getGameRules().getBoolean(GameRules.RULE_MOBGRIEFING)
             && owner != null && !owner.isSpectator() && owner.getAbilities().mayBuild
@@ -340,7 +353,7 @@ public final class SkillRunner {
         if (active.blockTarget == null || npc.level().getBlockState(active.blockTarget).isAir()) {
             clearCracks();
             active.blockTarget = findWorkBlock(active.plan.position(), material, active.skipped).orElse(null);
-            active.approach = null;
+            active.spots = List.of();
             active.approachTarget = null;
             active.clearingTarget = null;
             active.leafTicks = 0;
@@ -348,7 +361,7 @@ public final class SkillRunner {
             if (active.blockTarget == null) { finish(false, "区域内没有更多可触及的目标，已采集 " + active.progress + " 个"); return; }
         }
         BlockPos target = active.blockTarget;
-        if (!canChange(target) || !matchesMaterial(npc.level().getBlockState(target), material)) { skipWorkBlock(); return; }
+        if (!mayModify(target) || !matchesMaterial(npc.level().getBlockState(target), material)) { skipWorkBlock(); return; }
         Vec3 center = Vec3.atCenterOf(target);
         npc.getLookControl().setLookAt(center.x, center.y, center.z);
         var hit = traceBlock(npc.getEyePosition(), target);
@@ -370,7 +383,7 @@ public final class SkillRunner {
             active.leafTicks = 0;
         }
         // Only the visible block is ever broken, even after repositioning.
-        npc.getNavigation().stop();
+        navigator.stop();
         active.blockedTicks = 0;
         BlockState state = npc.level().getBlockState(target);
         if (!matchesMaterial(state, material)) { skipWorkBlock(); return; }
@@ -393,7 +406,7 @@ public final class SkillRunner {
             active.progress++;
         } else { finish(false, "方块破坏失败"); return; }
         active.blockTarget = null;
-        active.approach = null;
+        active.spots = List.of();
         active.approachTarget = null;
         active.clearingTarget = null;
         active.leafTicks = 0;
@@ -402,18 +415,22 @@ public final class SkillRunner {
 
     private void approachWorkBlock(BlockPos target) {
         if (!target.equals(active.approachTarget)) {
-            active.approach = null;
+            navigator.stop();
             active.approachTarget = target;
-            active.lastPosition = null;
-            active.blockedTicks = 0;
+            active.spots = workSpots(target);
+            active.settleTicks = 0;
         }
-        if (active.approach == null) active.approach = workApproach(target);
-        if (active.approach == null || npc.distanceToSqr(active.approach) < 0.16) { skipWorkBlock(); return; }
-        navigate(active.approach, 1);
+        if (active.spots.isEmpty()) { skipWorkBlock(); return; }
+        switch (travel(NavGoal.anyOf(active.spots), policy(), 1)) {
+            // Standing on a working spot that still cannot see or reach the block: give up on this block.
+            case ARRIVED -> { if (++active.settleTicks > 20) skipWorkBlock(); }
+            case FAILED -> skipWorkBlock();
+            case RUNNING -> {}
+        }
     }
 
     private boolean canClearLeaf(BlockPos leaf, BlockPos log) {
-        if (active.clearedLeaves >= 24 || leaf.distSqr(log) > 4 * 4 || !canChange(leaf)) return false;
+        if (active.clearedLeaves >= 24 || leaf.distSqr(log) > 4 * 4 || !mayModify(leaf)) return false;
         BlockState state = npc.level().getBlockState(leaf);
         // Do not turn harvesting into arbitrary excavation or tear down player-placed leaf hedges.
         return state.is(BlockTags.LEAVES) && (!state.hasProperty(net.minecraft.world.level.block.LeavesBlock.PERSISTENT)
@@ -427,7 +444,7 @@ public final class SkillRunner {
             active.leafTicks = 0;
             active.workTicks = 0;
         }
-        npc.getNavigation().stop();
+        navigator.stop();
         active.blockedTicks = 0;
         Vec3 center = Vec3.atCenterOf(leaf);
         npc.getLookControl().setLookAt(center.x, center.y, center.z);
@@ -443,7 +460,7 @@ public final class SkillRunner {
             active.blockTarget.toShortString(), leaf.toShortString(), active.clearedLeaves);
         active.clearingTarget = null;
         active.leafTicks = 0;
-        active.approach = null;
+        active.spots = List.of();
         active.approachTarget = null;
     }
 
@@ -464,8 +481,8 @@ public final class SkillRunner {
         return traceBlock(eye, target).getBlockPos().equals(target);
     }
 
-    private Vec3 workApproach(BlockPos target) {
-        List<BlockPos> spots = new java.util.ArrayList<>();
+    private List<BlockPos> workSpots(BlockPos target) {
+        List<BlockPos> spots = new ArrayList<>();
         for (BlockPos cursor : BlockPos.betweenClosed(target.offset(-3, -4, -3), target.offset(3, 1, 3))) {
             BlockPos pos = cursor.immutable();
             if (!npc.level().hasChunkAt(pos) || !npc.level().getWorldBorder().isWithinBounds(pos)
@@ -475,18 +492,16 @@ public final class SkillRunner {
             Vec3 eye = feet.add(0, npc.getEyeHeight(), 0);
             if (eye.distanceToSqr(Vec3.atCenterOf(target)) <= 3.5 * 3.5 && seesBlock(eye, target)) spots.add(pos);
         }
-        spots.sort(Comparator.comparingDouble(pos -> npc.distanceToSqr(Vec3.atBottomCenterOf(pos))));
-        for (BlockPos pos : spots) {
-            var path = npc.getNavigation().createPath(pos, 0);
-            if (path != null && path.canReach()) return Vec3.atBottomCenterOf(pos);
-        }
-        return null;
+        return spots;
     }
 
     private void give() {
         ServerPlayer owner = npc.owner();
-        if (npc.distanceToSqr(owner) > 3 * 3) { navigate(owner.position(), 1); return; }
-        npc.getNavigation().stop();
+        if (npc.distanceToSqr(owner) > 3 * 3) {
+            if (travel(NavGoal.near(owner.blockPosition(), 2), policy(), 1) == Navigator.Status.FAILED) navigationFailed();
+            return;
+        }
+        navigator.stop();
         boolean missing = false;
         for (var entry : npc.brain().collectedItems().entrySet()) {
             Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(entry.getKey()));
@@ -512,16 +527,16 @@ public final class SkillRunner {
         if (origin == null) { finish(false, "没有建筑位置"); return; }
         if (active.progress >= 9) { finish(true, "3×3 橡木平台已完成"); return; }
         BlockPos target = origin.offset(active.progress % 3, 0, active.progress / 3);
-        if (!canChange(target)) { finish(false, "建筑位置不可修改"); return; }
+        if (!mayModify(target)) { finish(false, "建筑位置不可修改"); return; }
         if (npc.level().getBlockState(target).is(Blocks.OAK_PLANKS)) { active.progress++; return; }
         if (!npc.level().getBlockState(target).isAir()) { finish(false, "建筑位置被占用，不会覆盖原有方块"); return; }
         if (npc.backpack().countItem(Items.OAK_PLANKS) == 0) { finish(false, "橡木木板不足"); return; }
         Vec3 center = Vec3.atCenterOf(target);
         if (npc.getEyePosition().distanceToSqr(center) > 4 * 4) {
-            navigate(Vec3.atBottomCenterOf(origin.west()), 1);
+            if (travel(NavGoal.near(origin.west(), 1), policy(), 1) == Navigator.Status.FAILED) navigationFailed();
             return;
         }
-        npc.getNavigation().stop();
+        navigator.stop();
         if (!npc.level().getEntities(npc, new AABB(target), Entity::isAlive).isEmpty()
             || npc.getBoundingBox().intersects(new AABB(target))) {
             active.blockedTicks++;
@@ -538,20 +553,33 @@ public final class SkillRunner {
         } else finish(false, "方块放置失败");
     }
 
-    private void navigate(Vec3 destination, double speed) {
-        if (!npc.level().hasChunkAt(BlockPos.containing(destination))) { finish(false, "目标区块未加载"); return; }
-        if (npc.getNavigation().isDone() && npc.distanceToSqr(destination) < 2.25)
-            npc.getMoveControl().setWantedPosition(destination.x, destination.y, destination.z, speed);
-        if (active.ticks % 20 != 1) return;
-        if (active.lastPosition != null && npc.position().distanceToSqr(active.lastPosition) < 0.08) active.blockedTicks += 20;
-        else active.blockedTicks = 0;
-        active.lastPosition = npc.position();
-        if (active.blockedTicks >= 160) {
-            if (active.plan.skill() == Skill.HARVEST || active.plan.skill() == Skill.MINE) skipWorkBlock();
-            else finish(false, "路径不可达或持续卡住");
-            return;
-        }
-        npc.getNavigation().moveTo(destination.x, destination.y, destination.z, speed);
+    private Navigator.Status travel(NavGoal goal, NavPolicy policy, double speed) { return navigator.tick(goal, policy, speed); }
+
+    private NavPolicy policy() {
+        NpcConfig config = JevNpcMod.config();
+        return new NavPolicy(config.navAllowBreak, config.navAllowPlace, config.navMaxFall, false, false);
+    }
+
+    private NavPolicy walking() { return NavPolicy.walking(JevNpcMod.config().navMaxFall); }
+
+    /** Continuous skills survive a failed route and try again every few seconds. */
+    private void retryLater() { if (active.ticks % 100 == 0) navigator.stop(); }
+
+    private void navigationFailed() { finish(false, describe(navigator.failure())); }
+
+    public static String describe(NavOutcome outcome) {
+        return switch (outcome) {
+            case NavOutcome.NeedBlocks need -> "路上需要 " + need.needed() + " 块垫脚方块，背包里只有 " + need.carried() + " 块";
+            case NavOutcome.NeedsPermission permission when permission.kind().equals("risk") -> "路线要在岩浆上方冒险通过";
+            case NavOutcome.NeedsPermission permission -> "路线要挖穿约 " + permission.blocks() + " 个可能是别人放置的方块";
+            case NavOutcome.Unreachable unreachable -> switch (unreachable.reason()) {
+                case "unloaded" -> "目标区域还没有加载";
+                case "too_far" -> "目标太远或地形太复杂，没有找到路线";
+                case "stuck" -> "移动时一直卡住";
+                default -> "找不到能过去的路线";
+            };
+            case null -> "路径不可达";
+        };
     }
 
     public boolean equip(Item item, EquipmentSlot slot) {
@@ -593,7 +621,7 @@ public final class SkillRunner {
         int progress = active.progress;
         String skill = active.plan.skill().name();
         clearCracks();
-        npc.getNavigation().stop();
+        navigator.stop();
         active = null;
         lastOutcome = (success ? "completed: " : "failed: ") + skill + " " + reason;
         npc.remember(lastOutcome);

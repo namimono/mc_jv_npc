@@ -314,6 +314,129 @@ public final class NpcGameTests implements FabricGameTest {
         fixture.owner().getAbilities().mayBuild = true;
         helper.succeed();
     }
+    private static ActionPlan move(BlockPos destination) {
+        return new ActionPlan("test_move", Skill.MOVE, destination, null, "", 1, "Test move");
+    }
+
+    /** Two stone islands four blocks above the floor, separated by {@code gap} open columns at x = 2 .. 1 + gap. */
+    private static void islands(GameTestHelper helper, JevNpcEntity npc, int gap) {
+        for (int z = 2; z <= 4; z++) {
+            for (int x = 0; x <= 1; x++) helper.setBlock(x, 4, z, Blocks.STONE);
+            for (int x = gap + 2; x <= gap + 3; x++) helper.setBlock(x, 4, z, Blocks.STONE);
+        }
+        Vec3 start = helper.absoluteVec(new Vec3(1.5, 5, 3.5));
+        npc.moveTo(start.x, start.y, start.z, 0, 0);
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
+    public void navigatorClimbsOntoRaisedPlatform(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int x = 3; x <= 7; x++) for (int z = 1; z <= 5; z++) helper.setBlock(x, 1, z, Blocks.STONE);
+        BlockPos destination = helper.absolutePos(new BlockPos(5, 2, 3));
+        npc.skills().start(move(destination), false);
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.getY() >= destination.getY() - 0.01, "must climb onto the platform");
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 400)
+    public void navigatorDigsOutOfSealedDirtRoom(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int x = 0; x <= 2; x++) for (int y = 1; y <= 3; y++) for (int z = 2; z <= 4; z++)
+            if (x != 1 || z != 3 || y == 3) helper.setBlock(x, y, z, Blocks.DIRT);
+        BlockPos destination = helper.absolutePos(new BlockPos(5, 1, 3));
+        npc.skills().start(move(destination), false);
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.distanceToSqr(Vec3.atBottomCenterOf(destination)) < 2.5, "must dig out and reach the destination");
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+            helper.assertTrue(npc.backpack().countItem(Items.DIRT) > 0, "dug dirt must be kept as building blocks");
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)
+    public void navigatorNeverDigsThroughPlanksWithoutPermission(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int x = 0; x <= 2; x++) for (int y = 0; y <= 3; y++) for (int z = 2; z <= 4; z++)
+            if (x != 1 || z != 3 || y == 0 || y == 3) helper.setBlock(x, y, z, Blocks.OAK_PLANKS);
+        npc.skills().start(move(helper.absolutePos(new BlockPos(5, 1, 3))), false);
+        helper.runAfterDelay(40, () -> {
+            helper.assertFalse(npc.skills().hasTask(), "a route that needs breaking built blocks must end the move");
+            helper.assertTrue(npc.skills().summary().contains("别人放置"), "failure must name the built blocks: " + npc.skills().summary());
+            helper.assertBlockPresent(Blocks.OAK_PLANKS, new BlockPos(2, 1, 3));
+            helper.assertBlockPresent(Blocks.OAK_PLANKS, new BlockPos(1, 0, 3));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
+    public void navigatorJumpsSingleGap(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        islands(helper, npc, 1);
+        npc.skills().start(move(helper.absolutePos(new BlockPos(4, 5, 3))), false);
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+            helper.assertTrue(npc.getY() >= helper.absoluteVec(new Vec3(0, 5, 0)).y - 0.01, "must not fall into the gap");
+            helper.assertTrue(npc.getX() > helper.absoluteVec(new Vec3(3, 0, 0)).x, "must land on the far island");
+            helper.assertBlockNotPresent(Blocks.DIRT, new BlockPos(2, 4, 3));
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 400)
+    public void navigatorBridgesGapWithCarriedBlocks(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        islands(helper, npc, 3);
+        npc.backpack().addItem(new ItemStack(Items.DIRT, 8));
+        npc.skills().start(move(helper.absolutePos(new BlockPos(6, 5, 3))), false);
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+            helper.assertTrue(npc.getX() > helper.absoluteVec(new Vec3(5, 0, 0)).x, "must cross to the far island");
+            helper.assertTrue(npc.getY() >= helper.absoluteVec(new Vec3(0, 5, 0)).y - 0.01, "must not fall");
+            helper.assertTrue(npc.backpack().countItem(Items.DIRT) == 5, "three blocks bridge the three-block gap");
+            for (int x = 2; x <= 4; x++) helper.assertBlockPresent(Blocks.DIRT, new BlockPos(x, 4, 3));
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 60)
+    public void navigatorReportsHowManyBlocksAreMissing(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        islands(helper, npc, 3);
+        npc.skills().start(move(helper.absolutePos(new BlockPos(6, 5, 3))), false);
+        helper.runAfterDelay(20, () -> {
+            helper.assertFalse(npc.skills().hasTask(), "move must end when no route exists");
+            helper.assertTrue(npc.skills().summary().contains("需要 3 块"), "must say how many blocks are missing: " + npc.skills().summary());
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 300)
+    public void navigatorWalksAroundLava(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int z = 1; z <= 5; z++) helper.setBlock(4, 0, z, Blocks.LAVA);
+        BlockPos destination = helper.absolutePos(new BlockPos(7, 1, 3));
+        npc.skills().start(move(destination), false);
+        helper.onEachTick(() -> { if (npc.isInLava() || npc.isOnFire()) helper.fail("must never touch lava"); });
+        helper.succeedWhen(() -> {
+            helper.assertTrue(npc.distanceToSqr(Vec3.atBottomCenterOf(destination)) < 2.5, "must reach the far side");
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+            for (int z = 1; z <= 5; z++) helper.assertBlockPresent(Blocks.LAVA, new BlockPos(4, 0, z));
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 400)
+    public void navigatorPillarsUpBesideTallColumn(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        for (int y = 1; y <= 3; y++) helper.setBlock(4, y, 3, Blocks.OAK_PLANKS);
+        npc.backpack().addItem(new ItemStack(Items.DIRT, 6));
+        BlockPos top = helper.absolutePos(new BlockPos(4, 4, 3));
+        npc.skills().start(move(top), false);
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.skills().hasTask(), "move must complete");
+            helper.assertTrue(npc.getY() >= top.getY() - 1.01, "must pillar up next to the column");
+            helper.assertTrue(npc.backpack().countItem(Items.DIRT) <= 4, "pillaring consumes carried dirt");
+        });
+    }
+
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 500)
     public void harvestTallTrunkFromGroundThroughLowCanopy(GameTestHelper helper) {
         var npc = fixture(helper).npc();
