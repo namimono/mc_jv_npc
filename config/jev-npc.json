@@ -9,5 +9,7 @@
   "maxRequestsPerMinute": 60,
   "minimumConfidence": 0.35,
   "allowBlockChanges": true,
-  "debugToOwner": true
+  "debugToOwner": true,
+  "maxGoalRounds": 16,
+  "maxGoalTicks": 3600
 }

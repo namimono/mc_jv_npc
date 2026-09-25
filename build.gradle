@@ -56,3 +56,47 @@ java {
     withSourcesJar()
 }
 test { useJUnitPlatform() }
+
+// Opt-in real-client acceptance test, excluded from the production jar.
+sourceSets {
+    clientValidation {
+        compileClasspath += sourceSets.main.output + sourceSets.client.output + sourceSets.client.compileClasspath
+        runtimeClasspath += output + compileClasspath + sourceSets.client.runtimeClasspath
+    }
+}
+loom {
+    mods {
+        jev_npc_validation { sourceSet sourceSets.clientValidation }
+    }
+    runs {
+        clientValidation {
+            client()
+            source sourceSets.clientValidation
+            runDir 'build/client-validation'
+            programArgs '--username', 'NpcValidator', '--width', '1280', '--height', '720'
+        }
+    }
+}
+tasks.named('runClientValidation') {
+    doFirst {
+        def destination = file('build/client-validation/config')
+        destination.mkdirs()
+        copy { from 'config/jev-npc.json'; into destination }
+        def secret = file('run/config/jev-npc.secret.json')
+        if (!secret.exists()) secret = file('config/jev-npc.secret.json')
+        if (secret.exists()) {
+            def target = new File(destination, secret.name)
+            java.nio.file.Files.copy(secret.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            java.nio.file.Files.setPosixFilePermissions(target.toPath(), java.nio.file.attribute.PosixFilePermissions.fromString('rw-------'))
+        }
+        file('build/client-validation/result.txt').delete()
+        (1..4).each { file("build/client-validation/screenshots/stage-${it}.png").delete() }
+    }
+    doLast {
+        def result = file('build/client-validation/result.txt')
+        def framesPresent = (1..4).every { file("build/client-validation/screenshots/stage-${it}.png").length() > 0 }
+        if (!result.exists() || !result.text.startsWith('PASS\n') || !framesPresent) {
+            throw new GradleException('Client acceptance failed; inspect build/client-validation/result.txt and logs/latest.log')
+        }
+    }
+}

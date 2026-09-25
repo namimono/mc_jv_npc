@@ -1,0 +1,116 @@
+# 树冠遮挡与缺省数量回归 · 2026-09-23
+
+最新隔离客户端验收为 PASS，测试使用真实官网 Jev。四格云杉树干的所有侧面均被低垂树叶包住，复现用户在树林中被告知没有木头的问题。原实现的发现、采集和高树干地面站位测试均先失败，修复后通过。
+
+| 场景 | 最新结果 |
+| --- | --- |
+| 帮我搞点木头可以吗 | 5 轮；观察到四个被树叶遮挡的树干，清除局部挡路的天然树叶，采集并交付四块云杉原木；保留初始物资 |
+| 去水里 | 4 轮；进入目标水格中央；检查实际入水与客户端画面 |
+| 挖地面 | 5 轮；使用 cautious 性格和报告中的七条旧失败／请求记忆；正确理解 mine/ground，未指定数量采用一块，成功挖出泥土并交付 |
+
+挖地面的原始复现：verb=mine、material=ground，二者置信度均 1.0；amount 却返回 unsupported、置信度约 0.22–0.29，拖低整个判断并重复失败。新增 amount_explicit 后，最终实测为 0.04，数量分支被忽略，整体采用的置信度为 0.98。明确指定的数量仍检查数量分支；不是全局降低置信度门限。
+
+测试命令：
+
+```bash
+./scripts/dev.sh test build
+./scripts/dev.sh runClientValidation
+```
+
+27 项 JUnit、17 项 GameTest 通过。新增覆盖包括叶遮树干仍可发现、清叶后采集、四格高树干地面站位、保留玩家放置的树叶、区分权限拒绝与没有木头，以及缺省数量不能否定已明确的挖掘意图。
+
+当前证据：`build/client-validation/result.txt`、`build/client-validation/logs/latest.log`、`build/forest-client-validation.log`。截图 stage-1 是完整树冠，stage-2 是清除局部遮挡并交付后，stage-3 为入水，stage-4 为挖掘结束。已查看 stage-1 和 stage-2：树冠仅局部被清理，NPC 已返回主人旁边；背包数量另由服务端和客户端断言验证。
+
+叶子清理限制：实际射线命中、可触及、权限允许、距目标树干四格内、每步骤最多 24 片天然树叶。不会自动挖石头或清理玩家放置的 persistent 树叶。复杂地形仍可能失败，但有目标却无法接近时不再表述为没有目标。
+
+以下为历史记录，证据路径由最新验收覆盖。
+
+---
+
+# 首次多轮 Agent Loop 客户端验收 · 2026-09-23
+
+结论：真实官网 Jev → 观察工具 → 下一轮决策 → 实际执行 → 结果反馈的循环通过。使用隔离客户端、新建固定种子平坦世界和真实 key；没有模拟模型结果。测试完成后客户端自动退出，未修改用户开发世界。
+
+| 自然语言输入 | 实际循环与断言 |
+| --- | --- |
+| 帮我搞点木头可以吗 | 6 轮模型调用；解释采集四块并交付 → 观察 → 首次采集只有两块，保留目标 → 换目标补足两块 → 走到主人旁边交付 → 验证结束。主人获得四块原木，NPC 原木为零；初始 32 木板和 8 面包保留 |
+| 去水里 | 4 轮；解释 → 观察浅水位置 → 前往真实候选 → 结束；服务端及客户端均检查 NPC 实际在水里 |
+| 挖一下地面 | 5 轮；解释为表层地面一块 → 观察 → 挖掘 → 交付 → 结束；泥土总数增加一块 |
+
+这些轮数是本次实际运行记录，不保证模型每次选择相同路径。只测试有限样本；攻击铁傀儡尚未做官网自然语言端到端验证。
+
+测试修复了采集后仍提供旧目标的问题，以及靠近树干时被树叶遮住视线的问题。执行器会寻找能看到目标且可寻路到达的站位；不可接近的方块跳过，剩余数量和失败反馈进入下一轮。独立 GameTest 还验证完全被遮挡的原木不会让整个采集提前中止。
+
+## 当前证据与复跑
+
+- `build/client-validation/result.txt`：最新 PASS、三条任务的轮次和工具结果。
+- `build/client-validation/logs/latest.log`：真实模型与工具调用日志，诊断不发到聊天。
+- `build/client-validation/screenshots/stage-1.png`：测试地形，包含遮挡树干及浅水。
+- `build/client-validation/screenshots/stage-2.png`：采集后 NPC 返回主人身边；物品转移另有客户端背包断言。
+- `build/client-validation/screenshots/stage-3.png`：NPC 站在水里。已查看本帧和 stage-2 的真实渲染画面。
+- `build/client-validation/screenshots/stage-4.png`：挖地面后的场景。
+- JUnit 26 项通过；GameTest 12 项通过；构建通过。
+- 发布 JAR 不包含客户端验收／GameTest 入口。
+
+```bash
+./scripts/dev.sh test build
+./scripts/dev.sh runClientValidation
+```
+
+每阶段最多 2600 服务端 tick，全局最多 300 秒；每次删除旧结果和四张旧截图，缺失或失败使 Gradle 返回失败。场景使用独立 `build/client-validation/` 运行目录；会发生真实 API 调用。密钥不会出现在报告中。
+
+以下保留历史记录；上列当前证据路径会被最新测试覆盖。
+
+---
+
+# 历史验收 · 2026-09-22
+
+结论：Demo 的官网 Jev → 游戏行为 → 客户端显示核心流程可用。使用实际配置的 key 和默认 `jev-1.13.0`，没有模拟模型响应，也没有修改生产代码或放宽请求超时。
+
+## 覆盖与断言
+
+独立测试模组 `src/clientValidation` 自动创建固定种子 42042 的创造模式平坦世界，固定白天、晴天，关闭生物生成。由服务端线程执行真实 `/jev spawn`、`/jev ask` 命令，客户端线程检查实体、装备和方块同步并捕获渲染缓冲区。
+
+| 输入 | 可失败的检查 |
+| --- | --- |
+| 跟着我，别离我太远 | 选择 follow_owner，距离主人小于 3.5 格且实际接近超过 3 格 |
+| 停下来，原地等待 | 选择 wait_here，执行器进入 WAIT |
+| 穿上背包里的铁胸甲 | 选择 equip_armor，服务端和客户端胸甲槽均为铁胸甲 |
+| 在旁边搭一个3×3橡木平台 | 实际完成建造，服务端和客户端均有指定位置的 9 块橡木木板，背包木板从 32 减至 23 |
+
+初次完整验收四次官网响应分别为 853、366、319、296 ms，置信度为 0.93、0.94、0.97、0.80。这是少量样本，不代表延迟或中文理解准确率的统计保证。
+
+每个阶段最多等待 700 服务端 tick，客户端总超时 240 秒。每轮删除旧结果和四张旧截图，缺失结果、断言失败、超时或截图缺失均使 Gradle 任务失败。每轮创建独立新世界，结束后关闭测试客户端。
+
+## 证据
+
+- `build/client-validation/result.txt`：最近一次整体断言结果与模型调用记录。
+- `build/client-validation/logs/latest.log`：客户端和集成服务器日志。
+- `build/client-validation/screenshots/stage-1.png`：初始 NPC。
+- `build/client-validation/screenshots/stage-2.png`：跟随靠近后的 NPC。
+- `build/client-validation/screenshots/stage-3.png`：已装备铁胸甲。
+- `build/client-validation/screenshots/stage-4.png`：完成的橡木平台与 NPC。
+- 已查看真实截图，人物、姓名、手持物品、铁胸甲和平台可见。初次截图中聊天 HUD 会遮挡部分下方画面，最终夹具在装备与建造截图阶段隐藏 HUD，并固定建造截图镜头朝向。
+- JUnit 19/19 通过：调度 6 项、HTTP 8 项、配置 5 项。
+- Minecraft GameTest 6/6 通过：移动、采集、挖掘、建造、阻挡保护、装备/进食/持久化。
+- 发布产物 `build/libs/jev-npc-0.1.0.jar`，不包含验收或 GameTest 入口。
+
+## 复跑
+
+正常环境：
+
+```bash
+./scripts/dev.sh test build runGameTest
+./scripts/dev.sh runClientValidation
+```
+
+本机下载 Gradle wrapper 9.4.1 遇到 TLS 握手错误，此次使用已安装的 Gradle 9.5.1，未修改 wrapper 或项目锁定版本：
+
+```bash
+/Users/nakami/.gradle/wrapper/dists/gradle-9.5.1-bin/iq79hdu3mqx29lgffhp8bfmx/gradle-9.5.1/bin/gradle test build runGameTest --console=plain
+/Users/nakami/.gradle/wrapper/dists/gradle-9.5.1-bin/iq79hdu3mqx29lgffhp8bfmx/gradle-9.5.1/bin/gradle runClientValidation --console=plain
+```
+
+验收会发生真实 API 调用。测试配置复制到独立目录；密钥内容不写入报告、日志或版本控制。用户存档与普通开发实例保持不变。
+
+未覆盖：官网模型驱动的采集/挖矿/战斗、多人权限交互、复杂地形、长期生存、定向聊天前缀入口与完整模型准确率评估。等待行为验证了决策和执行器状态，未单独进行长期静止测量。服务端 GameTest 中的采集/挖矿通过不等于相应自然语言理解已验证。

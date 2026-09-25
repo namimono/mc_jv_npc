@@ -13,10 +13,14 @@ public final class NpcConfig {
     public int maxResultAgeMs = 4000;
     public int maxRequestsPerMinute = 60;
     public double minimumConfidence = 0.35;
+    public int maxGoalRounds = 16;
+    public int maxGoalTicks = 3600;
     public boolean allowBlockChanges = true;
     public boolean debugToOwner = true;
 
     public void validate() {
+        maxGoalRounds = Math.clamp(maxGoalRounds, 4, 64);
+        maxGoalTicks = Math.clamp(maxGoalTicks, 200, 24000);
         if (apiKey == null) apiKey = "";
         if (model == null || model.isBlank()) model = "jev-1.13.0";
         requestTimeoutMs = Math.clamp(requestTimeoutMs, 250, 10000);

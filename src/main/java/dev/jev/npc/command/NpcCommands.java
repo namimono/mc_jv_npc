@@ -8,6 +8,7 @@ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import dev.jev.npc.JevNpcMod;
 import dev.jev.npc.behavior.ActionPlan;
 import dev.jev.npc.behavior.Skill;
+import dev.jev.npc.config.ConfigStore;
 import dev.jev.npc.entity.JevNpcEntity;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.SharedSuggestionProvider;
@@ -38,7 +39,8 @@ public final class NpcCommands {
             .then(literal("ask").then(argument("message", StringArgumentType.greedyString()).executes(context -> {
                 var player = context.getSource().getPlayerOrException();
                 require(player).brain().chat(player, StringArgumentType.getString(context, "message"));
-                if (JevNpcMod.config().effectiveKey().isBlank()) player.sendSystemMessage(Component.literal("尚未配置 API key。填写 config/jev-npc.secret.json 后 /jev reload；本地测试用 /jev do。"));
+                if (JevNpcMod.config().effectiveKey().isBlank()) player.sendSystemMessage(Component.literal(
+                    "尚未配置 API key。填写 " + ConfigStore.secretPath(JevNpcMod.configPath()) + " 后 /jev reload；本地测试用 /jev do。"));
                 return 1;
             })))
             .then(literal("do").then(argument("skill", StringArgumentType.word())

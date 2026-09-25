@@ -8,6 +8,11 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.resources.ResourceLocation;
+import java.util.HashSet;
+import java.util.Set;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -42,17 +47,27 @@ public final class SkillRunner {
         int ticks;
         int blockedTicks;
         int workTicks;
+        int clearedLeaves;
+        int leafTicks;
+        BlockPos clearingTarget;
+        BlockPos approachTarget;
         BlockPos blockTarget;
+        Vec3 approach;
         Vec3 lastPosition;
+        final Set<BlockPos> skipped = new HashSet<>();
         Task(ActionPlan plan) { this.plan = plan; }
         CompoundTag save() {
             CompoundTag tag = plan.save();
             tag.putInt("progress", progress);
+            tag.putInt("clearedLeaves", clearedLeaves);
+            tag.putLongArray("skipped", skipped.stream().mapToLong(BlockPos::asLong).toArray());
             return tag;
         }
         static Task load(CompoundTag tag) {
             Task task = new Task(ActionPlan.load(tag));
             task.progress = Math.clamp(tag.getInt("progress"), 0, 64);
+            task.clearedLeaves = Math.clamp(tag.getInt("clearedLeaves"), 0, 24);
+            for (long pos : tag.getLongArray("skipped")) task.skipped.add(BlockPos.of(pos));
             return task;
         }
     }
@@ -70,18 +85,18 @@ public final class SkillRunner {
         if (plan.skill() == Skill.CONTINUE) return;
         if (plan.skill() == Skill.RESUME) { resume(); return; }
         if (active != null && active.plan.equals(plan)) return;
-        if (plan.skill() == Skill.SPEAK) { speak(plan.argument()); return; }
+        if (plan.skill() == Skill.SPEAK) { speak(plan); return; }
         if (plan.skill() == Skill.EQUIP) {
             boolean result = equip(Items.IRON_CHESTPLATE, EquipmentSlot.CHEST);
-            announceInstant(result ? "装备了铁胸甲" : "背包里没有铁胸甲");
+            announceInstant(plan, result, result ? "装备了铁胸甲" : "背包里没有铁胸甲");
             return;
         }
         if (plan.skill() == Skill.EAT) {
             if (npc.backpack().countItem(Items.BREAD) > 0) {
                 npc.backpack().removeItemType(Items.BREAD, 1);
                 npc.heal(6);
-                announceInstant("吃了面包，恢复了 6 点生命值（Demo 规则）");
-            } else announceInstant("没有面包");
+                announceInstant(plan, true, "吃了面包，恢复了 6 点生命值（Demo 规则）");
+            } else announceInstant(plan, false, "没有面包");
             return;
         }
         if (preserveCurrent && active != null && active.plan.skill() != Skill.FLEE && active.plan.skill() != Skill.ATTACK) {
@@ -91,12 +106,25 @@ public final class SkillRunner {
         npc.getNavigation().stop();
         active = new Task(plan);
         lastOutcome = "running";
-        npc.tellOwner("开始：" + plan.description());
+        npc.tellOwner(switch (plan.skill()) {
+            case HARVEST -> "开始采集木头，目标 " + plan.count() + " 块。";
+            case MINE -> "开始挖掘，目标 " + plan.count() + " 块。";
+            case GIVE -> "我把这次采集的物品送给你。";
+            case MOVE -> plan.argument().equals("water") ? "我去找到的浅水里。" : "我去指定位置。";
+            case ATTACK -> "开始攻击选中的生物。";
+            case BUILD -> "开始搭建 3×3 橡木平台。";
+            case FOLLOW -> "我会跟着你。";
+            case WAIT -> "我在这里等你。";
+            case GUARD -> "我会守卫这里。";
+            case FLEE -> "附近有危险，我先撤退。";
+            default -> "开始执行。";
+        });
     }
 
-    private void announceInstant(String message) {
+    private void announceInstant(ActionPlan plan, boolean success, String message) {
         npc.tellOwner(message);
         npc.remember(message);
+        npc.brain().stepFinished(plan, success, 0, message);
         npc.brain().requestHandled();
     }
 
@@ -151,11 +179,12 @@ public final class SkillRunner {
             case ATTACK -> attack();
             case HARVEST, MINE -> mine();
             case BUILD -> build();
+            case GIVE -> give();
             default -> finish(false, "不支持的持续技能");
         }
     }
 
-    private static boolean isWork(Skill skill) { return skill == Skill.HARVEST || skill == Skill.MINE || skill == Skill.BUILD || skill == Skill.MOVE; }
+    private static boolean isWork(Skill skill) { return skill == Skill.HARVEST || skill == Skill.MINE || skill == Skill.BUILD || skill == Skill.MOVE || skill == Skill.GIVE; }
 
     private void follow() {
         ServerPlayer owner = npc.owner();
@@ -169,8 +198,14 @@ public final class SkillRunner {
     private void move() {
         if (active.plan.position() == null) { finish(false, "没有目的地"); return; }
         Vec3 target = Vec3.atBottomCenterOf(active.plan.position());
-        if (npc.distanceToSqr(target) < 2.5) {
+        boolean water = active.plan.argument().equals("water");
+        if (water && !npc.level().getFluidState(active.plan.position()).is(FluidTags.WATER)) {
+            finish(false, "目标位置已经没有水"); return;
+        }
+        double horizontalDistance = Math.pow(npc.getX() - target.x, 2) + Math.pow(npc.getZ() - target.z, 2);
+        if (water ? horizontalDistance < 0.09 && npc.isInWater() : npc.distanceToSqr(target) < 2.5) {
             if (active.plan.skill() == Skill.FLEE && emergencyLocked()) { npc.getNavigation().stop(); return; }
+            npc.setDeltaMovement(0, npc.getDeltaMovement().y, 0);
             finish(true, "已到达目的地");
         } else navigate(target, active.plan.skill() == Skill.FLEE ? 1.35 : 1.0);
     }
@@ -192,7 +227,7 @@ public final class SkillRunner {
     private void attack() {
         Entity entity = active.plan.target() == null ? null : npc.serverLevel().getEntity(active.plan.target());
         if (!(entity instanceof LivingEntity target) || !target.isAlive()) { finish(true, "攻击目标已消失"); return; }
-        if (!(target instanceof Enemy) || target.distanceToSqr(npc) > 24 * 24) { finish(false, "目标不再是允许追击的敌人"); return; }
+        if (target instanceof Player || target == npc || (!(target instanceof Enemy) && !active.plan.argument().equals("owner_target")) || target.distanceToSqr(npc) > 24 * 24) { finish(false, "目标不再是允许追击的敌人"); return; }
         combat(target);
     }
 
@@ -217,18 +252,58 @@ public final class SkillRunner {
 
     /** Search is bounded and only touches loaded chunks. Tree candidates require nearby leaves. */
     public Optional<BlockPos> findWorkBlock(BlockPos center, boolean logs) {
+        return findWorkBlock(center, logs ? "log" : "stone", Set.of());
+    }
+
+    private Optional<BlockPos> findWorkBlock(BlockPos center, String material, Set<BlockPos> skipped) {
         BlockPos best = null;
         double bestDistance = Double.MAX_VALUE;
         for (BlockPos mutable : BlockPos.betweenClosed(center.offset(-8, -2, -8), center.offset(8, 6, 8))) {
             BlockPos position = mutable.immutable();
-            if (!npc.level().hasChunkAt(position) || npc.distanceToSqr(Vec3.atCenterOf(position)) > 20 * 20) continue;
-            BlockState state = npc.level().getBlockState(position);
-            if (!(logs ? state.is(BlockTags.LOGS) && hasLeavesNearby(position) : state.is(Blocks.STONE) || state.is(Blocks.COBBLESTONE))) continue;
-            if (!exposed(position) || !canChange(position)) continue;
+            if (skipped.contains(position) || npc.distanceToSqr(Vec3.atCenterOf(position)) > 20 * 20
+                || !isWorkTarget(position, material)) continue;
             double distance = npc.distanceToSqr(Vec3.atCenterOf(position));
             if (distance < bestDistance) { bestDistance = distance; best = position; }
         }
         return Optional.ofNullable(best);
+    }
+
+    public boolean isWorkTarget(BlockPos position, String material) {
+        return observedWorkTarget(position, material) && canChange(position);
+    }
+
+    /** Physical discovery is independent of line of sight, reachability and modification permission. */
+    public boolean observedWorkTarget(BlockPos position, String material) {
+        if (!npc.level().hasChunkAt(position)) return false;
+        BlockState state = npc.level().getBlockState(position);
+        return matchesMaterial(state, material)
+            && (material.equals("log") ? hasLeavesNearby(position) : exposed(position));
+    }
+
+    private boolean matchesMaterial(BlockState state, String material) {
+        return switch (material) {
+            case "log" -> state.is(BlockTags.LOGS);
+            case "ground" -> state.is(Blocks.GRASS_BLOCK) || state.is(Blocks.DIRT) || state.is(Blocks.COARSE_DIRT)
+                || state.is(Blocks.PODZOL) || state.is(Blocks.ROOTED_DIRT);
+            default -> state.is(Blocks.STONE) || state.is(Blocks.COBBLESTONE);
+        };
+    }
+
+    private void skipWorkBlock() {
+        clearCracks();
+        if (active.blockTarget != null) {
+            JevNpcMod.LOGGER.info("Jev work skip target={} npcPosition={} approach={}", active.blockTarget.toShortString(), npc.position(), active.approach);
+            active.skipped.add(active.blockTarget);
+        }
+        active.blockTarget = null;
+        active.approach = null;
+        active.approachTarget = null;
+        active.clearingTarget = null;
+        active.leafTicks = 0;
+        active.workTicks = 0;
+        active.blockedTicks = 0;
+        active.lastPosition = null;
+        npc.getNavigation().stop();
     }
 
     private boolean hasLeavesNearby(BlockPos position) {
@@ -258,33 +333,47 @@ public final class SkillRunner {
         if (active.plan.position() == null) { finish(false, "没有作业区域"); return; }
         if (active.progress >= active.plan.count()) { finish(true, "采集数量已完成"); return; }
         boolean logs = active.plan.skill() == Skill.HARVEST;
+        String material = logs ? "log" : active.plan.argument().equals("ground") ? "ground" : "stone";
         if (!equip(logs ? Items.IRON_AXE : Items.IRON_PICKAXE, EquipmentSlot.MAINHAND)) {
             finish(false, "缺少所需工具"); return;
         }
         if (active.blockTarget == null || npc.level().getBlockState(active.blockTarget).isAir()) {
             clearCracks();
-            active.blockTarget = findWorkBlock(active.plan.position(), logs).orElse(null);
+            active.blockTarget = findWorkBlock(active.plan.position(), material, active.skipped).orElse(null);
+            active.approach = null;
+            active.approachTarget = null;
+            active.clearingTarget = null;
+            active.leafTicks = 0;
             active.workTicks = 0;
-            if (active.blockTarget == null) { finish(active.progress > 0, "区域内没有更多可触及的目标"); return; }
+            if (active.blockTarget == null) { finish(false, "区域内没有更多可触及的目标，已采集 " + active.progress + " 个"); return; }
         }
         BlockPos target = active.blockTarget;
-        if (!canChange(target)) { finish(false, "作业位置已不可修改"); return; }
+        if (!canChange(target) || !matchesMaterial(npc.level().getBlockState(target), material)) { skipWorkBlock(); return; }
         Vec3 center = Vec3.atCenterOf(target);
         npc.getLookControl().setLookAt(center.x, center.y, center.z);
-        if (npc.getEyePosition().distanceToSqr(center) > 3.5 * 3.5) {
-            navigate(Vec3.atBottomCenterOf(target), 1);
+        var hit = traceBlock(npc.getEyePosition(), target);
+        BlockPos obstruction = hit.getBlockPos();
+        boolean occluded = !obstruction.equals(target);
+        if (logs && occluded && canClearLeaf(obstruction, target)) {
+            if (npc.getEyePosition().distanceToSqr(Vec3.atCenterOf(obstruction)) <= 3.5 * 3.5) {
+                clearLeaf(obstruction);
+            } else approachWorkBlock(obstruction);
             return;
         }
-        // Require line of sight to the actual block; do not mine through intervening terrain.
-        var hit = npc.level().clip(new net.minecraft.world.level.ClipContext(npc.getEyePosition(), center,
-            net.minecraft.world.level.ClipContext.Block.COLLIDER, net.minecraft.world.level.ClipContext.Fluid.NONE, npc));
-        if (!hit.getBlockPos().equals(target)) { finish(false, "目标被其他方块遮挡"); return; }
+        if (npc.getEyePosition().distanceToSqr(center) > 3.5 * 3.5 || occluded) {
+            approachWorkBlock(target);
+            return;
+        }
+        if (active.clearingTarget != null) {
+            clearCracks();
+            active.clearingTarget = null;
+            active.leafTicks = 0;
+        }
+        // Only the visible block is ever broken, even after repositioning.
         npc.getNavigation().stop();
         active.blockedTicks = 0;
         BlockState state = npc.level().getBlockState(target);
-        if (!(logs ? state.is(BlockTags.LOGS) : state.is(Blocks.STONE) || state.is(Blocks.COBBLESTONE))) {
-            finish(false, "方块已变化"); return;
-        }
+        if (!matchesMaterial(state, material)) { skipWorkBlock(); return; }
         active.workTicks++;
         if (active.workTicks % 8 == 0) npc.swing(InteractionHand.MAIN_HAND);
         npc.level().destroyBlockProgress(npc.getId(), target, Math.min(9, active.workTicks / 4));
@@ -293,12 +382,129 @@ public final class SkillRunner {
         List<ItemStack> drops = Block.getDrops(state, npc.serverLevel(), target, null, npc, tool);
         clearCracks();
         if (npc.level().destroyBlock(target, false, npc)) {
-            drops.forEach(this::storeOrDrop);
+            for (ItemStack drop : drops) {
+                ItemStack copy = drop.copy();
+                ItemStack remainder = npc.backpack().addItem(drop);
+                copy.setCount(copy.getCount() - remainder.getCount());
+                npc.brain().recordCollected(copy);
+                if (!remainder.isEmpty()) npc.spawnAtLocation(remainder);
+            }
             tool.hurtAndBreak(1, npc, EquipmentSlot.MAINHAND);
             active.progress++;
         } else { finish(false, "方块破坏失败"); return; }
         active.blockTarget = null;
+        active.approach = null;
+        active.approachTarget = null;
+        active.clearingTarget = null;
+        active.leafTicks = 0;
         active.workTicks = 0;
+    }
+
+    private void approachWorkBlock(BlockPos target) {
+        if (!target.equals(active.approachTarget)) {
+            active.approach = null;
+            active.approachTarget = target;
+            active.lastPosition = null;
+            active.blockedTicks = 0;
+        }
+        if (active.approach == null) active.approach = workApproach(target);
+        if (active.approach == null || npc.distanceToSqr(active.approach) < 0.16) { skipWorkBlock(); return; }
+        navigate(active.approach, 1);
+    }
+
+    private boolean canClearLeaf(BlockPos leaf, BlockPos log) {
+        if (active.clearedLeaves >= 24 || leaf.distSqr(log) > 4 * 4 || !canChange(leaf)) return false;
+        BlockState state = npc.level().getBlockState(leaf);
+        // Do not turn harvesting into arbitrary excavation or tear down player-placed leaf hedges.
+        return state.is(BlockTags.LEAVES) && (!state.hasProperty(net.minecraft.world.level.block.LeavesBlock.PERSISTENT)
+            || !state.getValue(net.minecraft.world.level.block.LeavesBlock.PERSISTENT));
+    }
+
+    private void clearLeaf(BlockPos leaf) {
+        if (!leaf.equals(active.clearingTarget)) {
+            clearCracks();
+            active.clearingTarget = leaf.immutable();
+            active.leafTicks = 0;
+            active.workTicks = 0;
+        }
+        npc.getNavigation().stop();
+        active.blockedTicks = 0;
+        Vec3 center = Vec3.atCenterOf(leaf);
+        npc.getLookControl().setLookAt(center.x, center.y, center.z);
+        if (++active.leafTicks % 4 == 0) npc.swing(InteractionHand.MAIN_HAND);
+        npc.level().destroyBlockProgress(npc.getId(), leaf, Math.min(9, active.leafTicks));
+        if (active.leafTicks < 10) return;
+        // The caller rechecks permission, range and the actual ray obstruction on every tick.
+        clearCracks();
+        if (!npc.level().destroyBlock(leaf, true, npc)) { skipWorkBlock(); return; }
+        active.clearedLeaves++;
+        npc.getMainHandItem().hurtAndBreak(1, npc, EquipmentSlot.MAINHAND);
+        JevNpcMod.LOGGER.info("Jev harvest cleared obstruction log={} leaf={} clearedLeaves={}",
+            active.blockTarget.toShortString(), leaf.toShortString(), active.clearedLeaves);
+        active.clearingTarget = null;
+        active.leafTicks = 0;
+        active.approach = null;
+        active.approachTarget = null;
+    }
+
+    public String workVisibility(BlockPos target) {
+        var hit = traceBlock(npc.getEyePosition(), target);
+        if (hit.getBlockPos().equals(target)) return "visible; reach and path still require checking";
+        return npc.level().getBlockState(hit.getBlockPos()).is(BlockTags.LEAVES)
+            ? "occluded by leaves; harvesting can clear a bounded number of natural leaves"
+            : "occluded by solid terrain; may require another approach";
+    }
+
+    private net.minecraft.world.phys.BlockHitResult traceBlock(Vec3 eye, BlockPos target) {
+        return npc.level().clip(new net.minecraft.world.level.ClipContext(eye, Vec3.atCenterOf(target),
+            net.minecraft.world.level.ClipContext.Block.COLLIDER, net.minecraft.world.level.ClipContext.Fluid.NONE, npc));
+    }
+
+    private boolean seesBlock(Vec3 eye, BlockPos target) {
+        return traceBlock(eye, target).getBlockPos().equals(target);
+    }
+
+    private Vec3 workApproach(BlockPos target) {
+        List<BlockPos> spots = new java.util.ArrayList<>();
+        for (BlockPos cursor : BlockPos.betweenClosed(target.offset(-3, -4, -3), target.offset(3, 1, 3))) {
+            BlockPos pos = cursor.immutable();
+            if (!npc.level().hasChunkAt(pos) || !npc.level().getWorldBorder().isWithinBounds(pos)
+                || !npc.level().getBlockState(pos).isAir() || !npc.level().getBlockState(pos.above()).isAir()
+                || !npc.level().getBlockState(pos.below()).isFaceSturdy(npc.level(), pos.below(), Direction.UP)) continue;
+            Vec3 feet = Vec3.atBottomCenterOf(pos);
+            Vec3 eye = feet.add(0, npc.getEyeHeight(), 0);
+            if (eye.distanceToSqr(Vec3.atCenterOf(target)) <= 3.5 * 3.5 && seesBlock(eye, target)) spots.add(pos);
+        }
+        spots.sort(Comparator.comparingDouble(pos -> npc.distanceToSqr(Vec3.atBottomCenterOf(pos))));
+        for (BlockPos pos : spots) {
+            var path = npc.getNavigation().createPath(pos, 0);
+            if (path != null && path.canReach()) return Vec3.atBottomCenterOf(pos);
+        }
+        return null;
+    }
+
+    private void give() {
+        ServerPlayer owner = npc.owner();
+        if (npc.distanceToSqr(owner) > 3 * 3) { navigate(owner.position(), 1); return; }
+        npc.getNavigation().stop();
+        boolean missing = false;
+        for (var entry : npc.brain().collectedItems().entrySet()) {
+            Item item = BuiltInRegistries.ITEM.get(ResourceLocation.parse(entry.getKey()));
+            int remaining = entry.getValue();
+            for (int slot = 0; slot < npc.backpack().getContainerSize() && remaining > 0; slot++) {
+                if (!npc.backpack().getItem(slot).is(item)) continue;
+                ItemStack stack = npc.backpack().removeItem(slot, remaining);
+                int moved = stack.getCount();
+                // Overflow belongs to the owner and is dropped at their feet.
+                owner.getInventory().add(stack);
+                if (!stack.isEmpty()) owner.drop(stack, false);
+                npc.brain().recordDelivered(entry.getKey(), moved);
+                remaining -= moved;
+                active.progress += moved;
+            }
+            if (remaining > 0) missing = true;
+        }
+        finish(!missing, missing ? "部分采集物已不在背包中，无法全部交付" : "已把本次采集的物品交给你");
     }
 
     private void build() {
@@ -334,11 +540,17 @@ public final class SkillRunner {
 
     private void navigate(Vec3 destination, double speed) {
         if (!npc.level().hasChunkAt(BlockPos.containing(destination))) { finish(false, "目标区块未加载"); return; }
+        if (npc.getNavigation().isDone() && npc.distanceToSqr(destination) < 2.25)
+            npc.getMoveControl().setWantedPosition(destination.x, destination.y, destination.z, speed);
         if (active.ticks % 20 != 1) return;
         if (active.lastPosition != null && npc.position().distanceToSqr(active.lastPosition) < 0.08) active.blockedTicks += 20;
         else active.blockedTicks = 0;
         active.lastPosition = npc.position();
-        if (active.blockedTicks >= 160) { finish(false, "路径不可达或持续卡住"); return; }
+        if (active.blockedTicks >= 160) {
+            if (active.plan.skill() == Skill.HARVEST || active.plan.skill() == Skill.MINE) skipWorkBlock();
+            else finish(false, "路径不可达或持续卡住");
+            return;
+        }
         npc.getNavigation().moveTo(destination.x, destination.y, destination.z, speed);
     }
 
@@ -361,21 +573,24 @@ public final class SkillRunner {
         if (!remainder.isEmpty()) npc.spawnAtLocation(remainder);
     }
 
-    private void speak(String intent) {
+    private void speak(ActionPlan plan) {
         long now = npc.level().getGameTime();
-        if (now - lastSpeechTick < 100) return;
+        if (now - lastSpeechTick < 100 && !npc.brain().hasGoal()) return;
         lastSpeechTick = now;
-        String text = switch (intent) {
+        String text = switch (plan.argument()) {
             case "help" -> "附近有危险，请帮帮我！";
             case "greet" -> "你好，我是小杰。可以叫我跟随、守卫、砍树、挖石头或搭平台。";
-            default -> "我能跟随、守卫、撤退、砍树、挖石头、搭 3×3 橡木平台和装备铁胸甲。请告诉我具体要做什么。";
+            default -> "我是小杰，可以观察附近环境、去浅水里、采集并交付木头、挖地面或石头、攻击指定生物、跟随和守卫，也能搭 3×3 橡木平台。";
         };
         npc.say(text);
+        npc.brain().stepFinished(plan, true, 0, "已说明能力");
         npc.brain().requestHandled();
     }
 
     private void finish(boolean success, String reason) {
         if (active == null) return;
+        ActionPlan finishedPlan = active.plan;
+        int progress = active.progress;
         String skill = active.plan.skill().name();
         clearCracks();
         npc.getNavigation().stop();
@@ -383,13 +598,15 @@ public final class SkillRunner {
         lastOutcome = (success ? "completed: " : "failed: ") + skill + " " + reason;
         npc.remember(lastOutcome);
         npc.tellOwner(reason);
+        npc.brain().stepFinished(finishedPlan, success, progress, reason);
         npc.brain().requestHandled();
-        npc.brain().event(success ? "task_completed" : "task_failed", lastOutcome, true);
     }
 
     private void clearCracks() {
         if (active != null && active.blockTarget != null && !npc.level().isClientSide)
             npc.level().destroyBlockProgress(npc.getId(), active.blockTarget, -1);
+        if (active != null && active.clearingTarget != null && !npc.level().isClientSide)
+            npc.level().destroyBlockProgress(npc.getId(), active.clearingTarget, -1);
     }
 
     public CompoundTag save() {

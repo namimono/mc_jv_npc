@@ -31,13 +31,65 @@ public final class NpcBrain {
     private String ownerRequest = "";
     private BlockPos requestAnchor;
     private boolean held;
+    private AgentTask task;
+    private EnvironmentTools environment;
+    private String activeStep;
+    private JsonObject lastTask = new JsonObject();
+
+    public boolean hasGoal() { return task != null; }
+    public JsonObject taskState() { return task == null ? lastTask.deepCopy() : task.state(); }
+    public Map<String, Integer> collectedItems() { return task == null ? Map.of() : Map.copyOf(task.collected); }
+    public void recordCollected(ItemStack stack) {
+        if (task != null && activeStep != null && !stack.isEmpty()) {
+            task.collected.merge(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(), Integer::sum);
+            task.delivered = false;
+        }
+    }
+    public void recordDelivered(String item, int count) {
+        if (task != null) task.collected.computeIfPresent(item, (key, old) -> old <= count ? null : old - count);
+    }
+
+    public void stepFinished(ActionPlan plan, boolean success, int progress, String reason) {
+        if (task == null || !plan.id().equals(activeStep)) {
+            event(success ? "task_completed" : "task_failed", reason, true);
+            return;
+        }
+        activeStep = null;
+        task.feedback(plan.id(), success, progress, reason);
+        if (!success) task.failedTargets.add(plan.id());
+        if (plan.skill() == Skill.HARVEST || plan.skill() == Skill.MINE) task.gathered += progress;
+        else if (plan.skill() == Skill.GIVE) task.delivered = success && task.collected.isEmpty();
+        else if (success) task.actionSucceeded = true;
+        JevNpcMod.LOGGER.info("Jev tool result goal={} round={} tool={} success={} progress={} detail={}",
+            task.id, task.rounds, plan.id(), success, progress, reason);
+        event("tool_result", reason, true);
+    }
+
+    private void endGoal(boolean success, String message) {
+        if (task != null) {
+            lastTask = task.state();
+            lastTask.addProperty("outcome", success ? "completed" : "incomplete");
+            JevNpcMod.LOGGER.info("Jev goal ended id={} rounds={} outcome={} detail={}", task.id, task.rounds,
+                success ? "completed" : "incomplete", message);
+        }
+        task = null;
+        environment = null;
+        activeStep = null;
+        ownerRequest = "";
+        gate.invalidate();
+        events.drain();
+        npc.tellOwner(message);
+    }
 
     public NpcBrain(JevNpcEntity npc) { this.npc = npc; }
     public String status() { return status; }
     public void invalidate() { gate.invalidate(); }
-    public void requestHandled() { ownerRequest = ""; }
+    public void requestHandled() { if (task == null) ownerRequest = ""; }
     public void hold() {
         held = true;
+        task = null;
+        environment = null;
+        activeStep = null;
         ownerRequest = "";
         gate.invalidate();
         events.drain();
@@ -55,13 +107,27 @@ public final class NpcBrain {
     }
 
     public void chat(ServerPlayer player, String message) {
-        if (!npc.isOwner(player) || player.level() != npc.level() || player.distanceToSqr(npc) > 32 * 32) return;
+        String text = message == null ? "" : message;
+        if (text.length() > 300) text = text.substring(0, 300);
+        if (!npc.isOwner(player) || player.level() != npc.level() || player.distanceToSqr(npc) > 32 * 32) {
+            JevNpcMod.LOGGER.info("Jev owner message ignored npc={} player={} reason={} text=\"{}\"",
+                npc.getUUID(), player.getName().getString(), chatIgnoreReason(player), oneLine(text));
+            return;
+        }
         held = false;
-        ownerRequest = message.length() > 300 ? message.substring(0, 300) : message;
+        npc.skills().stop();
+        task = new AgentTask(text);
+        environment = new EnvironmentTools(npc);
+        activeStep = null;
+        events.drain();
+        nextDecisionTick = 0;
+        ownerRequest = text;
         requestAnchor = player.blockPosition();
         npc.remember("Owner said: " + ownerRequest);
         event("owner_chat", ownerRequest, true);
-        npc.tellOwner("已收到指令，等待 Jev 判断。当前动作会继续执行。");
+        JevNpcMod.LOGGER.info("Jev owner message npc={} player={} text=\"{}\"",
+            npc.getUUID(), player.getName().getString(), oneLine(ownerRequest));
+        npc.tellOwner("已收到指令，我会先判断目标，再观察环境并执行。");
     }
 
     public void tick() {
@@ -70,6 +136,28 @@ public final class NpcBrain {
         ServerPlayer owner = npc.owner();
         if (owner == null || owner.level() != npc.level() || owner.distanceToSqr(npc) > 48 * 48) return;
         long tick = npc.tickCount;
+        if (task != null) {
+            task.elapsedTicks++;
+            // A last allowed tool may still finish; round exhaustion is checked before the next HTTP call.
+            if (task.elapsedTicks >= config.maxGoalTicks || task.failures >= 4) {
+                npc.skills().stop();
+                endGoal(false, "这次任务未能完成，已达到时间或失败次数上限。");
+                return;
+            }
+            if (npc.skills().emergencyLocked() || activeStep != null && npc.skills().hasTask()) return;
+            if (activeStep != null && npc.skills().hasSuspendedTask()) {
+                npc.skills().resume();
+                return;
+            }
+            if (activeStep != null) {
+                activeStep = null;
+                event("tool_interrupted", "Previous tool was interrupted; reassess the goal", true);
+            }
+            if (!gate.inFlight() && task.exhausted(config.maxGoalRounds, config.maxGoalTicks)) {
+                endGoal(task.canComplete(), task.canComplete() ? "任务已完成。" : "这次任务未能完成，已达到决策轮数上限。");
+                return;
+            }
+        }
         if (tick % 20 == 0) {
             String current = (npc.level().isThundering() ? "thunder" : npc.level().isRaining() ? "rain" : "clear")
                 + (npc.level().isNight() ? "/night" : "/day");
@@ -83,7 +171,9 @@ public final class NpcBrain {
         if (!events.ready(tick, config.eventDebounceTicks) || gate.inFlight() || tick < nextDecisionTick) return;
         if (!config.enabled || config.effectiveKey().isBlank()) {
             status = config.enabled ? "NO_KEY: 本地技能模式" : "DISABLED: 本地技能模式";
-            events.drain();
+            Map<String, String> skipped = events.drain();
+            JevNpcMod.LOGGER.info("Jev request skipped npc={} reason={} ownerRequest=\"{}\" events=[{}]",
+                npc.getUUID(), status, oneLine(ownerRequest), formatEvents(skipped));
             return;
         }
         long nowMs = monotonicMs();
@@ -93,48 +183,117 @@ public final class NpcBrain {
             return;
         }
         Map<String, ActionPlan> options = options();
+        if (task != null) task.rounds++;
         List<Candidate> candidates = options.values().stream().map(ActionPlan::candidate).toList();
         Map<String, String> triggeringEvents = events.drain();
         JsonObject state = snapshot(triggeringEvents);
+        String requestText = oneLine(ownerRequest);
+        String eventText = formatEvents(triggeringEvents);
+        String candidateText = candidates.stream().map(Candidate::id).reduce((left, right) -> left + "," + right).orElse("(none)");
         DecisionGate.Ticket ticket = gate.begin(nowMs).orElseThrow();
         nextDecisionTick = tick + config.decisionCooldownTicks;
         status = "REQUESTING";
+        if (task != null) JevNpcMod.LOGGER.info("Jev goal request id={} round={} state={}", task.id, task.rounds, state);
+        JevNpcMod.LOGGER.info("Jev request npc={} model={} ownerRequest=\"{}\" events=[{}] candidates=[{}]",
+            npc.getUUID(), config.model, requestText, eventText, candidateText);
         var server = npc.getServer();
         var world = npc.level();
         JevNpcMod.client().decide(config.effectiveKey(), config.model, state, candidates, config.requestTimeoutMs)
             .whenComplete((decision, failure) -> server.execute(() -> {
                 boolean valid = gate.complete(ticket, monotonicMs(), config.maxResultAgeMs);
-                if (held) { status = "PAUSED: 手动控制"; return; }
+                if (held) {
+                    status = "PAUSED: 手动控制";
+                    logResult(requestText, eventText, "discarded:paused");
+                    return;
+                }
                 if (!valid || npc.isRemoved() || !npc.isAlive() || npc.level() != world) {
                     status = "STALE: 丢弃旧判断";
+                    logResult(requestText, eventText, "discarded:stale");
+                    if (task != null) event("retry_stale", "Refresh stale decision", false);
                     return;
                 }
                 ServerPlayer currentOwner = npc.owner();
                 if (currentOwner == null || currentOwner.level() != world || currentOwner.distanceToSqr(npc) > 48 * 48) {
                     status = "OWNER_UNAVAILABLE";
+                    logResult(requestText, eventText, "discarded:owner_unavailable");
                     return;
                 }
                 if (failure != null) {
                     status = JevClient.errorCode(failure);
                     nextDecisionTick = npc.tickCount + (status.equals("HTTP_401") || status.equals("HTTP_403") ? 1200 : 200);
                     npc.tellOwner("Jev 未完成判断（" + status + "），继续本地行为。/jev status 可查看状态。");
-                    JevNpcMod.LOGGER.warn("NPC {} Jev failure: {}", npc.getUUID(), status);
+                    JevNpcMod.LOGGER.warn("Jev result npc={} ownerRequest=\"{}\" outcome=failed:{}",
+                        npc.getUUID(), requestText, status);
+                    if (task != null) {
+                        task.feedback("model_request", false, 0, status);
+                        if (status.equals("HTTP_401") || status.equals("HTTP_403")) endGoal(false, "模型认证失败，任务已停止，请检查配置。");
+                        else event("retry_request", "Retry model request after backoff", false);
+                    }
                     return;
                 }
                 status = decision.candidateId() + " | " + decision.elapsedMs() + "ms | confidence="
                     + String.format(java.util.Locale.ROOT, "%.2f", decision.confidence()) + " | tokens=" + decision.inputTokens();
-                JevNpcMod.LOGGER.info("NPC {} decision={} model={} latencyMs={} inputTokens={} confidence={}",
-                    npc.getUUID(), decision.candidateId(), decision.model(), decision.elapsedMs(), decision.inputTokens(), decision.confidence());
-                if (config.debugToOwner) npc.tellOwner("Jev: " + status);
-                if (decision.confidence() < config.minimumConfidence || npc.skills().emergencyLocked()) {
+                boolean keep = decision.confidence() < config.minimumConfidence || npc.skills().emergencyLocked();
+                String outcome = !keep ? "applied"
+                    : npc.skills().emergencyLocked() ? "kept:emergency"
+                    : "kept:confidence_below_" + config.minimumConfidence;
+                JevNpcMod.LOGGER.info("Jev result npc={} ownerRequest=\"{}\" decision={} outcome={} model={} latencyMs={} inputTokens={} confidence={}",
+                    npc.getUUID(), requestText, decision.candidateId(), outcome, decision.model(),
+                    decision.elapsedMs(), decision.inputTokens(), decision.confidence());
+                if (decision.intent() != null) JevNpcMod.LOGGER.info("Jev interpretation npc={} intent={} judgments={}",
+                    npc.getUUID(), decision.intent(), decision.diagnostics());
+                if (keep) {
                     status += " | kept current task";
+                    if (task != null && decision.intent() != null && !npc.skills().emergencyLocked()) {
+                        endGoal(false, "我还没确定这条指令的动作或目标，请补充一下要做什么、针对什么。");
+                        return;
+                    }
+                    if (task != null) {
+                        task.feedback("decision", false, 0, "uncertain or emergency");
+                        event("retry_decision", "Reconsider uncertain decision using the observed evidence", false);
+                    }
+                    return;
+                }
+                if (task != null && decision.intent() != null) {
+                    task.intent = decision.intent();
+                    if (task.intent.verb().equals("unsupported")) {
+                        endGoal(false, "这条指令超出了当前能力，或目标还不明确。可以让我去附近浅水、采集木头、挖地面、攻击指定生物、跟随或守卫。");
+                    } else event("goal_interpreted", "Choose the next tool for the persistent goal", false);
                     return;
                 }
                 ActionPlan plan = options.get(decision.candidateId());
                 if (plan == null) return;
+                if (task != null) {
+                    applyTool(plan);
+                    return;
+                }
                 boolean interrupt = plan.skill() == Skill.ATTACK || plan.skill() == Skill.FLEE;
                 npc.skills().start(plan, interrupt);
             }));
+    }
+
+    private void applyTool(ActionPlan plan) {
+        switch (plan.skill()) {
+            case OBSERVE -> {
+                environment.observe(task, requestAnchor == null ? npc.blockPosition() : requestAnchor);
+                JevNpcMod.LOGGER.info("Jev observation goal={} round={} result={}", task.id, task.rounds, environment.state());
+                if (environment.state().getAsJsonArray("targets").isEmpty()) npc.tellOwner(environment.unavailableMessage(task.gathered > 0));
+                event("observation_ready", "Search results available; choose the next tool", false);
+            }
+            case FINISH -> {
+                if (task.canComplete()) endGoal(true, "任务已完成。");
+                else event("completion_rejected", "Goal completion is not verified", false);
+            }
+            case REPORT -> endGoal(false, environment.unavailableMessage(task.gathered > 0));
+            default -> {
+                activeStep = plan.id();
+                npc.skills().start(plan, false);
+                if (plan.skill() == Skill.FOLLOW || plan.skill() == Skill.WAIT || plan.skill() == Skill.GUARD) {
+                    task.actionSucceeded = true;
+                    endGoal(true, "已进入指定行为，会持续执行，直到你给出新指令。");
+                }
+            }
+        }
     }
 
     public void resetAfterReload() {
@@ -147,6 +306,8 @@ public final class NpcBrain {
         CompoundTag tag = new CompoundTag();
         tag.putBoolean("held", held);
         tag.putString("ownerRequest", ownerRequest);
+        if (task != null) tag.putString("agentTask", task.save());
+        if (activeStep != null) tag.putString("activeStep", activeStep);
         if (requestAnchor != null) tag.putLong("requestAnchor", requestAnchor.asLong());
         return tag;
     }
@@ -156,10 +317,19 @@ public final class NpcBrain {
         String savedRequest = tag.getString("ownerRequest");
         ownerRequest = savedRequest.length() > 300 ? savedRequest.substring(0, 300) : savedRequest;
         requestAnchor = tag.contains("requestAnchor") ? BlockPos.of(tag.getLong("requestAnchor")) : null;
+        if (!held && tag.contains("agentTask")) {
+            try {
+                task = AgentTask.load(tag.getString("agentTask"));
+                environment = new EnvironmentTools(npc);
+                activeStep = tag.contains("activeStep") ? tag.getString("activeStep") : null;
+                event("goal_loaded", "Resume saved goal; observations must be refreshed", false);
+            } catch (RuntimeException error) { task = null; activeStep = null; ownerRequest = ""; }
+        }
         status = held ? "PAUSED: 手动控制" : "loaded; awaiting event";
     }
 
     public Map<String, ActionPlan> options() {
+        if (task != null) return environment.options(task, requestAnchor == null ? npc.blockPosition() : requestAnchor);
         Map<String, ActionPlan> result = new LinkedHashMap<>();
         BlockPos anchor = requestAnchor == null ? npc.home() : requestAnchor;
         add(result, "continue_current", Skill.CONTINUE, null, null, "", 1, "Keep the current task and do not restart it. If idle, remain idle.");
@@ -207,6 +377,10 @@ public final class NpcBrain {
             case "diligent" -> "Diligent worker, finishes commitments, dislikes unnecessary interruptions, values safety.";
             default -> "Cautious, friendly, values survival and promises; prefers help or retreat when outmatched.";
         });
+        if (task != null) {
+            state.add("task", task.state());
+            state.add("environment", environment.state());
+        }
         state.addProperty("current_task", npc.skills().summary());
         state.addProperty("suspended_task", npc.skills().suspendedSummary());
         state.addProperty("owner_request", ownerRequest.isBlank() ? "No new outstanding owner request" : ownerRequest);
@@ -235,6 +409,32 @@ public final class NpcBrain {
             + "Only supplied actions are executable. Building supports one fixed 3x3 oak platform, not arbitrary structures. "
             + "Long tasks run locally. Weather alone need not interrupt work. Do not repeat a completed owner request.");
         return state;
+    }
+
+    private String chatIgnoreReason(ServerPlayer player) {
+        if (!npc.isOwner(player)) return "not_owner";
+        if (player.level() != npc.level()) return "different_dimension";
+        return "out_of_range";
+    }
+
+    private void logResult(String requestText, String eventText, String outcome) {
+        JevNpcMod.LOGGER.info("Jev result npc={} ownerRequest=\"{}\" events=[{}] outcome={}",
+            npc.getUUID(), requestText, eventText, outcome);
+    }
+
+    private static String oneLine(String text) {
+        if (text == null || text.isBlank()) return "(none)";
+        return text.replace('\r', ' ').replace('\n', ' ').replace('"', '\'');
+    }
+
+    private static String formatEvents(Map<String, String> events) {
+        if (events.isEmpty()) return "(none)";
+        StringBuilder builder = new StringBuilder();
+        events.forEach((kind, detail) -> {
+            if (!builder.isEmpty()) builder.append("; ");
+            builder.append(kind).append('=').append(oneLine(detail));
+        });
+        return builder.toString();
     }
 
     private static long monotonicMs() { return System.nanoTime() / 1_000_000; }

@@ -112,5 +112,70 @@ class JevClientTest {
         assertEquals("INVALID_KEY_FORMAT", JevClient.errorCode(error));
     }
 
+    @Test void interpretationIgnoresUnusedLowConfidenceBranches() {
+        String body = """
+            {"model":"jev-1.13.0","answers":{
+              "verb":{"type":"choice","choice":"go_to","confidence":0.9},
+              "place":{"type":"choice","choice":"water","confidence":0.8},
+              "amount":{"type":"choice","choice":"one","confidence":0.01},
+              "material":{"type":"choice","choice":"ground","confidence":0.01}
+            }}
+            """;
+        Decision decision = JevClient.parseIntent(body, 30);
+        assertEquals(0.8, decision.confidence());
+        assertEquals("water", decision.intent().place());
+        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseIntent(body.replace("water", "invented_coordinates"), 30));
+    }
+
+    @Test void interpretationUsesNoulProbabilityAndSelectedAmount() {
+        String body = """
+            {"model":"jev-1.13.0","answers":{
+              "verb":{"type":"choice","choice":"harvest","confidence":0.9},
+              "amount":{"type":"choice","choice":"a_few","confidence":0.8},
+              "amount_explicit":{"type":"noul","noul":0.99},
+              "deliver_to_owner":{"type":"noul","noul":0.5}
+            }}
+            """;
+        Decision decision = JevClient.parseIntent(body, 20);
+        assertEquals(4, decision.intent().amount());
+        assertTrue(decision.intent().deliverToOwner());
+        assertEquals(0.8, decision.confidence());
+        assertFalse(JevClient.parseIntent(body.replace("0.5", "0.2"), 20).intent().deliverToOwner());
+        assertThrows(JevClient.JevFailure.class, () -> JevClient.parseIntent(body.replace("0.5", "2.5"), 20));
+    }
+
+    @Test void initialGoalUsesTypedQuestionsThenToolResultsReachNextRequest() {
+        AgentTask task = new AgentTask("去水里");
+        JsonObject state = new JsonObject();
+        state.add("task", task.state());
+        var initial = JevClient.payload("jev-1.13.0", state, List.of());
+        assertTrue(initial.getAsJsonObject("questions").has("verb"));
+        assertFalse(initial.getAsJsonObject("questions").has("next_action"));
+        task.intent = new GoalIntent("go_to", "log", "water", 1, false);
+        task.feedback("observe_nearby", true, 1, "water_1 at observed coordinates");
+        state.add("task", task.state());
+        var next = JevClient.payload("jev-1.13.0", state, List.of(new Candidate("water_1", "Go to observed water")));
+        assertTrue(next.getAsJsonObject("questions").has("next_action"));
+        assertEquals(1, next.getAsJsonObject("state").getAsJsonObject("task").getAsJsonArray("tool_results").size());
+    }
+
+    @Test void absentQuantityCannotInvalidateClearlyUnderstoodDigRequest() {
+        // Reproduced live for 挖地面: verb/material=1.0, amount=unsupported with confidence 0.23.
+        String body = """
+            {"model":"jev-1.13.0","answers":{
+              "verb":{"type":"choice","choice":"mine","confidence":1.0},
+              "material":{"type":"choice","choice":"ground","confidence":1.0},
+              "amount":{"type":"choice","choice":"unsupported","confidence":0.23},
+              "amount_explicit":{"type":"noul","noul":0.01},
+              "deliver_to_owner":{"type":"noul","noul":0.8}
+            }}
+            """;
+        var decision = JevClient.parseIntent(body, 10);
+        assertEquals("mine", decision.intent().verb());
+        assertEquals(1, decision.intent().amount());
+        assertEquals(1.0, decision.confidence());
+        assertEquals("unsupported", JevClient.parseIntent(body.replace("0.01", "0.99"), 10).intent().verb());
+    }
+
     private JevClient localClient() { return new JevClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/systemone")); }
 }
