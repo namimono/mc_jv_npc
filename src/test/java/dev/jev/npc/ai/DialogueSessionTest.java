@@ -85,4 +85,39 @@ class DialogueSessionTest {
         begin();
         assertThrows(IllegalArgumentException.class, () -> session.select("consult_dialogue", false, false));
     }
+
+    @Test void providerFailureRequiresJevToRetryAndKeepsTheSingleRepairBudget() {
+        begin();
+        session.select("consult_dialogue", true, false);
+        long id = session.request().id();
+        var failure = new DeepSeekClient.Reply("交流失败，当前任务保持不变。", null, "keep", "", 0, 0);
+        session.generated(id, failure, "INVALID_RESPONSE");
+        assertEquals(DialogueSession.Phase.REVIEW, session.phase(), "failure must return to Jev, not auto-retry");
+        assertEquals("INVALID_RESPONSE", session.state().get("generation_error").getAsString());
+        assertEquals(0, session.minimumConfidence("send_reply", 0.35), "a factual provider-error notice needs no confidence in language interpretation");
+        assertThrows(IllegalArgumentException.class, () -> session.select("adopt_plan", true, false));
+        assertEquals(DialogueSession.Effect.GENERATE, session.select("clarify_understanding", true, false));
+        session.generated(id, failure, "INVALID_RESPONSE");
+        assertThrows(IllegalArgumentException.class, () -> session.select("clarify_understanding", true, false));
+        assertEquals(DialogueSession.Effect.SEND, session.select("send_reply", true, false));
+        begin();
+        assertFalse(session.state().has("generation_error"), "provider failures must not leak into the next message");
+    }
+
+    @Test void onlyJevCanPauseForARevisionAndAllTerminalOutcomesReleaseIt() {
+        begin();
+        assertFalse(session.pausesWork(), "receipt of player text alone must never pause");
+        assertEquals(DialogueSession.Effect.GENERATE, session.select("consult_and_pause", true, false));
+        assertTrue(session.pausesWork());
+        session.generated(session.request().id(), proposal());
+        assertTrue(session.pausesWork(), "keep progress frozen through review");
+        session.select("reject_plan", true, false);
+        assertFalse(session.pausesWork(), "rejected revision resumes original work");
+        begin(); session.select("consult_and_pause", true, false); session.clear();
+        assertFalse(session.pausesWork(), "cancellation/failure releases the pause");
+        session.begin(DialogueSession.Mode.UNDERSTAND_PLAYER, "闲聊", "chat", "none:initial");
+        assertThrows(IllegalArgumentException.class, () -> session.select("consult_and_pause", true, false));
+        session.select("consult_dialogue", true, false);
+        assertFalse(session.pausesWork(), "ordinary chat keeps the body moving");
+    }
 }

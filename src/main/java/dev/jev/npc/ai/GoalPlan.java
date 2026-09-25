@@ -9,7 +9,10 @@ import java.util.List;
 
 /** A free-form objective composed from actual methods; method schemas are not a whitelist of goals. */
 public record GoalPlan(String objective, List<String> constraints, String completion, List<Stage> stages) {
-    public record Stage(String purpose, GoalIntent method) {}
+    /** fromStage is a proposal-only reference to a stage in the current goal when amending it. */
+    public record Stage(String purpose, GoalIntent method, Integer fromStage) {
+        public Stage(String purpose, GoalIntent method) { this(purpose, method, null); }
+    }
     public GoalPlan {
         if (objective == null || objective.isBlank() || completion == null || completion.isBlank()
             || stages == null || stages.isEmpty() || stages.size() > 8) throw new IllegalArgumentException("Invalid goal plan");
@@ -18,6 +21,8 @@ public record GoalPlan(String objective, List<String> constraints, String comple
         stages = List.copyOf(stages);
         if (stages.stream().anyMatch(s -> s == null || s.method() == null || s.purpose() == null || s.purpose().isBlank()))
             throw new IllegalArgumentException("Missing method/purpose");
+        if (stages.stream().anyMatch(s -> s.fromStage() != null && (s.fromStage() < 0 || s.fromStage() >= 8)))
+            throw new IllegalArgumentException("Invalid continuation stage");
         for (int i = 0; i < stages.size() - 1; i++)
             if (java.util.Set.of("follow", "wait", "guard").contains(stages.get(i).method().verb()))
                 throw new IllegalArgumentException("Persistent behavior must be the final stage");
@@ -36,6 +41,7 @@ public record GoalPlan(String objective, List<String> constraints, String comple
             step.addProperty("place", stage.method().place());
             step.addProperty("amount", stage.method().amount());
             step.addProperty("deliver_to_owner", stage.method().deliverToOwner());
+            if (stage.fromStage() != null) step.addProperty("from_stage", stage.fromStage());
             steps.add(step);
         }
         result.add("stages", steps);
@@ -57,9 +63,20 @@ public record GoalPlan(String objective, List<String> constraints, String comple
             int amount = stage.has("amount") ? stage.get("amount").getAsBigDecimal().intValueExact() : 0;
             GoalIntent method = GoalIntent.validated(text(stage, "tool"), text(stage, "material"), text(stage, "place"), amount,
                 stage.has("deliver_to_owner") && stage.get("deliver_to_owner").getAsBoolean()).orElseThrow();
-            stages.add(new Stage(text(stage, "purpose"), method));
+            Integer fromStage = null;
+            if (stage.has("from_stage") && !stage.get("from_stage").isJsonNull()) {
+                if (!stage.get("from_stage").isJsonPrimitive() || !stage.getAsJsonPrimitive("from_stage").isNumber())
+                    throw new IllegalArgumentException("Continuation stage must be a number");
+                fromStage = stage.get("from_stage").getAsBigDecimal().intValueExact();
+            }
+            stages.add(new Stage(text(stage, "purpose"), method, fromStage));
         }
         return new GoalPlan(text(value, "objective"), constraints, text(value, "completion"), stages);
+    }
+    /** References are consumed on adoption; subsequent amendments refer to the new array indices. */
+    public GoalPlan adopted() {
+        return new GoalPlan(objective, constraints, completion,
+            stages.stream().map(stage -> new Stage(stage.purpose(), stage.method())).toList());
     }
     private static String text(JsonObject value, String key) {
         return value.has(key) && !value.get(key).isJsonNull() ? DeepSeekClient.clean(value.get(key).getAsString(), 300) : "";

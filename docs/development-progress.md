@@ -2,7 +2,7 @@
 
 更新日期：2026-09-25。对应方案：[design.md](design.md)、[layered-agent.md](layered-agent.md)。使用说明：[README](../README.md)。平台：Fabric / Minecraft 1.21.1 / Java 21。
 
-**当前实现分支：`codex/jev-led-harness`。** 先提交方案，再改为 Jev 统一高层决策、DeepSeek 按需承担玩家交流。新目标支持方法组合、多阶段持久进度与 1–256 块的阶段采集量；不再有 DeepSeek 直接开工、无 Jev 本地语义回退或关键词直接授权。70 项单测、31 项 GameTest、构建及真实客户端通过；十二块圆石交付、受伤治疗和回家由 Jev 完成，执行期间新增 DeepSeek 调用为零。当前方案见 [Harness 方案](deepseek-harness-proposal.md)，最新验证证据见 [客户端验收](client-validation.md)。
+**当前实现分支：`codex/jev-led-harness`。** 先提交方案，再改为 Jev 统一高层决策、DeepSeek 按需承担玩家交流。新目标支持方法组合、多阶段持久进度与 1–256 块的阶段采集量；不再有 DeepSeek 直接开工、无 Jev 本地语义回退或关键词直接授权。78 项单测、36 项 GameTest、构建及真实客户端通过；十二块圆石交付、受伤治疗和回家由 Jev 完成。执行中改为累计八块时，Jev 选择暂停交流，保留任务 ID 及已采三块，再采五块、准确交付八块并回家；两个任务的身体执行期间新增 DeepSeek 调用均为零。修订保留阶段证据、累计交付量和余料，暂停期间权限仍按时到期，紧急避险不受阻碍。当前方案见 [Harness 方案](deepseek-harness-proposal.md)，最新验证证据见 [客户端验收](client-validation.md)。
 
 **历史基线（分支 `feat/layered-agent`）：分层 Agent 的五步已全部实现，并通过真实客户端验收。** 所有移动改走新的寻路器（跳、落、游、跨缺口、挖穿、垫高、搭桥、避岩浆）；缺垫脚方块时代码先就近挖再继续；冒险或挖人造方块前在聊天框问主人，主人直接回话即可；NPC 会主动提醒天黑、受伤、背包满、工具快坏、看到钻石；空闲时按自己的需求和性格找事做；配置 DeepSeek 后可以自由对话，并能把对话变成经过校验的任务。66 项 JUnit、31 项 GameTest、构建通过；真实客户端使用官网 Jev 和 DeepSeek 完成闲聊、搭桥、两种追问路由、提问授权、自主补充方块和天黑提醒，留存六张截图，详见 [客户端验收记录](client-validation.md)。
 

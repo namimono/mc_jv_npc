@@ -3,6 +3,7 @@ package dev.jev.npc;
 import dev.jev.npc.behavior.ActionPlan;
 import dev.jev.npc.ai.AgentTask;
 import dev.jev.npc.ai.GoalIntent;
+import dev.jev.npc.ai.GoalPlan;
 import dev.jev.npc.ai.EnvironmentTools;
 import net.minecraft.world.item.ItemStack;
 import dev.jev.npc.behavior.Skill;
@@ -206,6 +207,160 @@ public final class NpcGameTests implements FabricGameTest {
         goal.failedTargets.add(target.id());
         helper.assertFalse(environment.options(goal, npc.blockPosition()).containsKey(target.id()), "failed target must not be offered again");
         helper.assertFalse(environment.options(goal, npc.blockPosition()).containsKey("finish_goal"), "search cannot complete goal");
+        helper.succeed();
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 650)
+    public void amendingUnfinishedMiningDeliversEightWithoutLosingTheFirstSeven(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        // Elevate this scene so observation cannot select natural underground stone or another test's blocks.
+        for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) helper.setBlock(x, 20, z, Blocks.DIRT);
+        for (int x = 3; x <= 6; x++) for (int y = 21; y <= 23; y++) helper.setBlock(x, y, 3, Blocks.STONE);
+        Vec3 npcStart = helper.absoluteVec(new Vec3(1.5, 21, 3.5));
+        npc.moveTo(npcStart.x, npcStart.y, npcStart.z, 0, 0);
+        Vec3 ownerStart = helper.absoluteVec(new Vec3(1.5, 21, 1.5));
+        fixture.owner().moveTo(ownerStart.x, ownerStart.y, ownerStart.z, 0, 0);
+        AgentTask goal = new AgentTask("挖十二块交给我");
+        goal.setPlan(new GoalPlan("十二块圆石", java.util.List.of(), "交付十二块", java.util.List.of(
+            new GoalPlan.Stage("采集交付", new GoalIntent("mine", "stone", "owner", 12, true)))));
+        CompoundTag state = new CompoundTag();
+        state.putString("agentTask", goal.save());
+        state.putString("ownerRequest", goal.request);
+        npc.brain().load(state);
+        runAcceptedTestStep(npc, new ActionPlan("mine_twelve", Skill.MINE, helper.absolutePos(new BlockPos(3, 21, 3)), null, "stone", 12, "mine twelve"));
+        int[] phase = {0};
+        helper.onEachTick(() -> {
+            if (phase[0] == 0 && npc.backpack().countItem(Items.COBBLESTONE) == 7) {
+                helper.assertTrue(npc.skills().hasTask(), "amend while the original mining step is still active");
+                helper.assertTrue(npc.brain().taskState().get("gathered_blocks").getAsInt() == 0, "unfinished step has not reported completion");
+                npc.brain().amendGoal("总共八块就够", new GoalPlan("八块圆石", java.util.List.of(), "交付八块", java.util.List.of(
+                    new GoalPlan.Stage("采集交付", new GoalIntent("mine", "stone", "owner", 8, true), 0))));
+                helper.assertTrue(npc.brain().taskState().get("id").getAsString().equals(goal.id), "amendment must retain goal identity");
+                helper.assertTrue(npc.brain().taskState().get("gathered_blocks").getAsInt() == 7, "checkpoint all seven mined blocks exactly once");
+                helper.assertFalse(npc.brain().options().containsKey("continue_current"), "a stopped step cannot be offered as running work");
+                AgentTask amended = AgentTask.load(npc.brain().save().getString("agentTask"));
+                var environment = new EnvironmentTools(npc);
+                environment.observe(amended, npc.blockPosition());
+                ActionPlan next = environment.options(amended, npc.blockPosition()).values().stream()
+                    .filter(plan -> plan.skill() == Skill.MINE).findFirst().orElseThrow();
+                helper.assertTrue(next.count() == 1, "the actual tool option must request just one more block");
+                runAcceptedTestStep(npc, next);
+                phase[0] = 1;
+            } else if (phase[0] == 1 && !npc.skills().hasTask()) {
+                helper.assertTrue(npc.backpack().countItem(Items.COBBLESTONE) == 8, "mine exactly one extra block");
+                runAcceptedTestStep(npc, new ActionPlan("deliver_collected", Skill.GIVE, null, null, "", 1, "deliver amended total"));
+                phase[0] = 2;
+            } else if (phase[0] == 2 && !npc.skills().hasTask()) {
+                helper.assertTrue(fixture.owner().getInventory().countItem(Items.COBBLESTONE) == 8, "deliver all eight, including the seven from before amendment; state=" + npc.brain().taskState()
+                    + "; carried=" + npc.backpack().countItem(Items.COBBLESTONE) + "; owner=" + fixture.owner().getInventory().countItem(Items.COBBLESTONE));
+                helper.assertTrue(npc.backpack().countItem(Items.COBBLESTONE) == 0, "no orphaned collected items remain");
+                helper.assertTrue(npc.brain().taskState().get("completion_verified").getAsBoolean(), "amended total is verified complete");
+                helper.assertTrue(npc.getMainHandItem().getDamageValue() == 8, "only eight blocks were actually mined");
+                helper.succeed();
+            }
+        });
+    }
+
+    /** Offline harness chooses an actual grounded tool; production Jev uses the same saved active-step correlation. */
+    private static void runAcceptedTestStep(JevNpcEntity npc, ActionPlan plan) {
+        CompoundTag state = npc.brain().save();
+        state.putString("activeStep", plan.id());
+        npc.brain().load(state);
+        npc.skills().start(plan, false);
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)
+    public void lateAmendmentCapsDeliveryAndKeepsExcessInventory(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        AgentTask goal = new AgentTask("挖十二块交给我");
+        goal.intent = new GoalIntent("mine", "stone", "owner", 12, true);
+        goal.gathered = 9; goal.deliveredCount = 3;
+        goal.collected.put("minecraft:cobblestone", 6);
+        CompoundTag state = new CompoundTag(); state.putString("agentTask", goal.save());
+        npc.brain().load(state);
+        npc.backpack().addItem(new ItemStack(Items.COBBLESTONE, 6));
+        fixture.owner().getInventory().add(new ItemStack(Items.COBBLESTONE, 3));
+        npc.brain().amendGoal("总共八块就够", new GoalPlan("交付八块", java.util.List.of(), "交付八块", java.util.List.of(
+            new GoalPlan.Stage("交付", new GoalIntent("mine", "stone", "owner", 8, true), 0))));
+        runAcceptedTestStep(npc, new ActionPlan("deliver_collected", Skill.GIVE, null, null, "", 1, "deliver revised quota"));
+        helper.succeedWhen(() -> {
+            helper.assertFalse(npc.skills().hasTask(), "delivery must finish");
+            helper.assertTrue(fixture.owner().getInventory().countItem(Items.COBBLESTONE) == 8, "prior three plus five new items equals the revised total");
+            helper.assertTrue(npc.backpack().countItem(Items.COBBLESTONE) == 1, "excess is retained as inventory");
+            helper.assertTrue(npc.brain().taskState().get("gathered_blocks").getAsInt() == 9, "actual over-collection must not be erased");
+            helper.assertTrue(npc.brain().taskState().get("delivered_count").getAsInt() == 8, "delivery count persists separately from collection");
+            helper.assertTrue(npc.brain().taskState().get("completion_verified").getAsBoolean(), "revised delivery is complete");
+        });
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE)
+    public void dialoguePauseFreezesWorkPreservesProgressAndAllowsEmergencyEscape(GameTestHelper helper) {
+        var fixture = fixture(helper);
+        var npc = fixture.npc();
+        for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) helper.setBlock(x, 20, z, Blocks.DIRT);
+        Vec3 start = helper.absoluteVec(new Vec3(1.5, 21, 3.5));
+        npc.moveTo(start.x, start.y, start.z, 0, 0);
+        fixture.owner().moveTo(start.x, start.y, start.z - 2, 0, 0);
+        helper.setBlock(3, 21, 3, Blocks.STONE); helper.setBlock(3, 22, 3, Blocks.STONE);
+        ActionPlan plan = new ActionPlan("paused_mine", Skill.MINE, helper.absolutePos(new BlockPos(3, 21, 3)), null, "stone", 2, "mine two");
+        npc.skills().start(plan, false);
+        for (int i = 0; i < 42; i++) npc.skills().tick();
+        helper.assertTrue(npc.skills().unfinishedGathered(plan.id()) == 1, "first block collected before pause");
+        npc.skills().pauseForDialogue(true);
+        for (int i = 0; i < 100; i++) npc.skills().tick();
+        helper.assertTrue(npc.skills().unfinishedGathered(plan.id()) == 1 && npc.backpack().countItem(Items.COBBLESTONE) == 1,
+            "paused work must keep progress without mining another block");
+        npc.skills().pauseForDialogue(false);
+        for (int i = 0; i < 60; i++) npc.skills().tick();
+        helper.assertTrue(npc.backpack().countItem(Items.COBBLESTONE) == 2 && !npc.skills().hasTask(), "unpause completes remaining work");
+        npc.skills().pauseForDialogue(true);
+        npc.setRemainingFireTicks(100);
+        npc.skills().tick();
+        helper.assertTrue(npc.skills().emergencyLocked(), "a dialogue pause must not suppress immediate survival reflexes");
+        helper.succeed();
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE)
+    public void permissionDeadlineStillExpiresWhileJevPausedWorkForDialogue(GameTestHelper helper) throws Exception {
+        var npc = fixture(helper).npc();
+        AgentTask goal = new AgentTask("到我这里");
+        goal.intent = new GoalIntent("go_to", "log", "owner", 1, false);
+        CompoundTag state = new CompoundTag(); state.putString("agentTask", goal.save()); npc.brain().load(state);
+        // Seed a paid-model decision offline; exercise the real brain timer and permission boundary.
+        var field = dev.jev.npc.ai.NpcBrain.class.getDeclaredField("dialogue"); field.setAccessible(true);
+        var dialogue = (dev.jev.npc.ai.DialogueSession) field.get(npc.brain());
+        dialogue.begin(dev.jev.npc.ai.DialogueSession.Mode.UNDERSTAND_PLAYER, "修改要求", "player", goal.id);
+        dialogue.select("consult_and_pause", true, false);
+        long deadline = helper.getLevel().getGameTime();
+        var question = new dev.jev.npc.ai.Communicator.Question("break_built", "可以挖吗", java.util.Map.of("yes", "同意", "no", "拒绝"), "no", deadline);
+        npc.speech().open(question);
+        helper.assertTrue(npc.speech().canAnswer(question, deadline - 1), "same question is answerable before its deadline");
+        helper.assertFalse(npc.speech().canAnswer(question, deadline), "even a not-yet-expired object cannot be answered at its deadline");
+        npc.brain().tick();
+        helper.assertTrue(npc.speech().pending().isEmpty(), "pause must not freeze question expiry");
+        helper.assertTrue(npc.brain().grants().isEmpty(), "expired permission must never become a grant");
+        helper.succeed();
+    }
+
+    @GameTest(template = EMPTY_STRUCTURE)
+    public void amendmentRechecksPendingPermissionWithoutGrantingOrBlockingTheRevisedAction(GameTestHelper helper) {
+        var npc = fixture(helper).npc();
+        AgentTask goal = new AgentTask("到我这里");
+        goal.intent = new GoalIntent("go_to", "log", "owner", 1, false);
+        CompoundTag state = new CompoundTag();
+        state.putString("agentTask", goal.save());
+        state.putString("activeStep", "go_to_destination");
+        npc.brain().load(state);
+        ActionPlan blocked = new ActionPlan("go_to_destination", Skill.MOVE, helper.absolutePos(new BlockPos(5, 1, 3)), null, "", 1, "move");
+        npc.brain().stepFinished(blocked, false, 0, "需挖人造方块", "needs_permission:break_built");
+        helper.assertTrue(npc.speech().pending().isPresent(), "executor failure creates a pending permission question");
+        npc.brain().amendGoal("还是来这里，受伤先吃面包", new GoalPlan("到主人处", java.util.List.of("受伤先治疗"), "到达", java.util.List.of(
+            new GoalPlan.Stage("到主人处", goal.intent, 0))));
+        helper.assertTrue(npc.speech().pending().isEmpty(), "old action's question is invalidated");
+        helper.assertTrue(npc.brain().grants().isEmpty(), "amendment is not a permission answer");
+        helper.assertTrue(npc.brain().options().containsKey("go_to_destination"), "revised action must remain eligible to execute and ask afresh");
         helper.succeed();
     }
     @GameTest(template = EMPTY_STRUCTURE, timeoutTicks = 100)

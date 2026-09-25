@@ -86,6 +86,9 @@ public final class Communicator {
     }
 
     public Optional<Question> pending() { return Optional.ofNullable(pending); }
+    public boolean canAnswer(Question expected, long tick) {
+        return expected != null && pending == expected && tick < expected.expiresAt();
+    }
     public void resolve() { pending = null; }
 
     /** The fallback answer once the open question has expired; the question is closed. */

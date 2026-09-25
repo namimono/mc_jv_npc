@@ -1,4 +1,42 @@
-# Jev 主导 Harness 验收 · 2026-09-25 16:30
+# Jev 主导 Harness 最终验收 · 2026-09-25 17:20
+
+**PASS。** 方案先提交为 `1617cdf`，实现位于 `codex/jev-led-harness`。最终执行 `./scripts/dev.sh test build runGameTest runClientValidation --console=plain`，**78 项 JUnit、36 项 GameTest、发布构建和隔离真实客户端全部通过**，耗时 2 分 51 秒。使用真实官网 `jev-1.13.0` 与 `deepseek-flash`，没有模拟客户端验收中的模型结果。独立检查也复跑了离线测试、GameTest 和构建并通过。
+
+| 场景 | 可失败断言与实际结果 |
+| --- | --- |
+| 闲聊及持续跟随时聊天 | Jev 路由 → DeepSeek → Jev 审查 → 回复；闲聊不创建目标，FOLLOW 在天气对话期间保持 |
+| 无垫脚方块跨三格缺口 | Jev 采用移动计划；本地挖五块泥土、搭三格桥并到达 |
+| 木板房、追问与授权 | 未授权时墙体完整；“为什么要挖墙？”保留同一任务及待答问题；普通聊天“可以，挖吧”由 Jev 判断同意，实际破坏两块木板后到达 |
+| 暂时关闭 Jev | 等待 240 tick，DeepSeek 调用数不增加；现有任务和问题保留，有明确失败提示，没有让 DeepSeek 接管 |
+| 十二块圆石、受伤先吃面包、交付后回家 | 两阶段计划；注入六点伤害后 Jev 选择进食，消耗一块面包并恢复满血；交付十二块，再回家。九轮行动判断，两个阶段都有完成证据；**执行期间新增 DeepSeek 调用为零** |
+| 采集中把十二块改成累计八块 | 已采三块时发送“刚才的十二块改成总共八块就够，已经挖的算在里面，仍然交给我再回家。”Jev 选择 `consult_and_pause`，理解后选择 `adopt_plan`；任务 ID 与已有三块进度保留，再采五块、准确交付八块并回家。全任务九轮行动判断；**修订后的执行新增 DeepSeek 调用为零** |
+| 空闲自主与黄昏 | Jev 选择 `stock_blocks`，180 tick 后已有四块；黄昏选择 `drop_message`，不调用 DeepSeek、不强制发言 |
+
+**修订与竞态的离线验证。** 新增断言覆盖阶段引用、重复修订、存档恢复、真实在途采集进度，以及交付上限：已采九块、已交三块后改为累计八块，只再交五块，余一块保留。GameTest 验证已采七块改八块只再采一块、暂停不丢进度且不阻碍紧急避险、暂停期间权限问题仍会到期，过期答复不能授权。没有运行中的身体步骤时，不向 Jev 提供“继续当前动作”这一虚假候选。
+
+**调用与时间。** 本次有 51 次成功 Jev 判断，中位数 573 ms、范围 467–1603 ms；13 次 DeepSeek 提案返回，中位数 1421 ms、范围 1016–2051 ms。时间包含 HTTP 往返，是一次小样本运行，不能推导准确率、长期稳定性或 P95。交流仍需路由、语言生成和审查；这里验证的是行动执行不依赖生成式模型。
+
+**本轮发现并修复的问题。** 独立审查发现修订曾重新创建任务，丢失采集账本；现在用阶段引用保留任务及证据。实际运行还暴露了辅助动作低置信度被累计为工具失败、语言服务格式错误被当作普通回复、冗余执行状态干扰意图审查、异步修订确认前超采，以及停止旧动作后仍反复选择“继续”。对应修复为窄问题与退避、结构化错误及 Jev 决定的一次理解修正、最小语义审查上下文、Jev 可选的对话暂停与累计交付上限、按实际运行状态提供候选。暂停导致权限过期处理延后的问题也已修复。
+
+意图审查同时补充了执行器确实支持随时进食／装备的工具说明，避免将“受伤先吃面包”误作不可满足的阶段外能力。上下文和问题共同调整，不能断言某一项是此前不确定判断的唯一原因。固定状态的三例真实判断中，正确十二块方案被采用，错误数量和“只是提问”的提案均未被采用；这是诊断样本，不是广泛语义可靠性证明。失败过程保留于 `build/jev-amend-client.log`、`build/jev-amend-final.log`、`build/jev-harness-acceptance.log`、`build/jev-final-acceptance.log`、`build/jev-final-harness.log`，最终结果以 `build/jev-acceptance-current.log` 为准。
+
+**画面与产物。** 共生成八张截图；人工检查 stage-3 的完整木板墙及授权问题，stage-8 的返家位置、剩余四块石头和玩家物品栏二十块圆石（前一任务十二块＋修订任务八块）。世界结果以服务端断言和账本为依据。发布 JAR 已检查不包含客户端验证器、GameTest 或密钥；测试客户端自动退出。
+
+- 完整运行：`build/jev-acceptance-current.log`
+- 独立离线复跑：`build/verify-jev-final.log`
+- 真实客户端：`build/client-validation/result.txt`、`build/client-validation/logs/latest.log`
+- 截图：`build/client-validation/screenshots/stage-1.png` 至 `stage-8.png`
+- 发布包：`build/libs/jev-npc-0.1.0.jar`，208904 字节；SHA-256：`9c141ea82e1d925e47ac2add3ca3fbb03962ff06030fdee43b8c4fc2d205fda6`
+
+重跑会清除旧结果和八张截图，缺文件、断言失败、超时或崩溃会使任务失败。密钥只保留在被忽略的本地配置中。
+
+**结论与边界。** 本次支持“Jev 统一高层决策、DeepSeek 按需交流”在已有方法范围内可行，包含执行中理解玩家修订并继续任务。仍不具备任意新工具或无限开放规划；多人并发、长期生存、全部中文表达及网络压力没有充分实测，不能把单次成功当作普遍可靠。详见 [Harness 方案](deepseek-harness-proposal.md)。
+
+以下保留历史记录。16:30 的部分基线证据另存于 `build/jev-led-baseline-1630/`，原客户端结果与截图路径已被最终运行覆盖。
+
+---
+
+# Jev 主导 Harness 首轮验收 · 2026-09-25 16:30
 
 **PASS。** 方案先提交为 `1617cdf`，实现位于 `codex/jev-led-harness`。执行 `./scripts/dev.sh test build runGameTest runClientValidation --console=plain`，70 项 JUnit、31 项 GameTest、发布构建和隔离真实客户端全部通过；本轮耗时 2 分 18 秒。模型为官网 `jev-1.13.0` 与 `deepseek-flash`，没有模拟客户端验收中的模型结果。
 

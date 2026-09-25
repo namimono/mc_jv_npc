@@ -59,6 +59,9 @@ public final class ClientValidation implements ClientModInitializer {
     private String asyncActivity;
     private boolean hurtInjected;
     private int breadBefore;
+    private String amendedGoal;
+    private int amendmentInventoryBaseline;
+    private boolean amendmentSent, amendmentAdopted;
     private JevNpcEntity npc;
 
     @Override public void onInitializeClient() {
@@ -107,7 +110,7 @@ public final class ClientValidation implements ClientModInitializer {
             Screenshot.grab(client.gameDirectory, "stage-" + capture + ".png", client.getMainRenderTarget(), message -> {});
             captured = capture;
             settled = 0;
-            if (capture == 4) finish(client, true, "Client received idle chat, the contextual explanation and permission question; Jev processed nightfall with discretion to remain silent; seven rendered frames captured; Jev routing and review, asynchronous chat, multi-stage twelve-stone delivery, and unavailable-Jev isolation verified.");
+            if (capture == 4) finish(client, true, "Client received idle chat, the contextual explanation and permission question; Jev processed nightfall with discretion to remain silent; eight rendered frames captured; Jev routing and review, asynchronous chat, multi-stage twelve-stone delivery, live cumulative amendment to eight, and unavailable-Jev isolation verified.");
         } catch (Throwable error) { finish(client, false, error.getClass().getSimpleName() + ": " + error.getMessage()); }
     }
 
@@ -133,6 +136,8 @@ public final class ClientValidation implements ClientModInitializer {
     private boolean completed() {
         if (!goalStarted) {
             goalStarted = npc.brain().hasGoal();
+            if (!goalStarted && ticks > 200 && !npc.brain().dialogueState().has("phase"))
+                throw new IllegalStateException("No goal was adopted: " + npc.brain().dialogueState());
             return false;
         }
         if (npc.brain().hasGoal()) return false;
@@ -341,7 +346,51 @@ public final class ClientValidation implements ClientModInitializer {
                     capture = 7; stage = 19; ticks = 0;
                 }
                 case 19 -> {
-                    if (captured != 7) return;
+                    if (captured != 7 || npc.brain().dialogueState().has("phase")) return;
+                    npc.skills().stop(); npc.brain().hold();
+                    fill(level, 52, -60, 0, 55, -58, 0, Blocks.STONE);
+                    npc.moveTo(50.5, -60, 2.5, 0, 0);
+                    npc.home(new BlockPos(50, -60, 2));
+                    stand(player, level, 51.5, -60, 5.5, 180, 15, false);
+                    amendmentInventoryBaseline = player.getInventory().countItem(Items.COBBLESTONE);
+                    chat("@小杰 再帮我挖十二块圆石交给我，然后回到你家。");
+                    goalStarted = false; actionLlmBaseline = -1;
+                    stage = 20; ticks = 0;
+                }
+                case 20 -> {
+                    if (npc.brain().hasGoal()) {
+                        if (amendedGoal == null) {
+                            amendedGoal = npc.brain().taskState().get("id").getAsString();
+                            goalStarted = true;
+                        }
+                        require(npc.brain().taskState().get("id").getAsString().equals(amendedGoal), "amendment must keep the same goal identity");
+                        if (!amendmentSent && npc.backpack().countItem(Items.COBBLESTONE) >= 3) {
+                            record("AMENDMENT sent during active mining: " + npc.brain().taskState());
+                            chat("@小杰 刚才的十二块改成总共八块就够，已经挖的算在里面，仍然交给我再回家。");
+                            amendmentSent = true;
+                        }
+                        if (amendmentSent && npc.brain().taskState().getAsJsonObject("plan").getAsJsonArray("stages")
+                            .get(0).getAsJsonObject().get("amount").getAsInt() == 8) {
+                            if (!amendmentAdopted) {
+                                amendmentAdopted = true;
+                                actionLlmBaseline = npc.brain().dialogueState().get("llm_requests").getAsInt();
+                                record("AMENDMENT adopted with retained progress: " + npc.brain().taskState());
+                            }
+                            require(npc.brain().dialogueState().get("llm_requests").getAsInt() == actionLlmBaseline, "amended execution must use no language calls");
+                        }
+                    }
+                    if (!completed()) return;
+                    require(amendmentSent && amendmentAdopted, "the player revision must be adopted, not replaced or ignored");
+                    require(npc.brain().taskState().get("id").getAsString().equals(amendedGoal), "completed amendment retains goal ID");
+                    require(player.getInventory().countItem(Items.COBBLESTONE) == amendmentInventoryBaseline + 8, "deliver exactly eight in the revised goal");
+                    require(npc.backpack().countItem(Items.COBBLESTONE) == 0, "no orphaned amendment loot");
+                    require(npc.distanceToSqr(net.minecraft.world.phys.Vec3.atBottomCenterOf(npc.home())) < 4, "amendment preserves return-home stage");
+                    record("AMENDED GOAL: eight cobblestone delivered, same goal ID, no orphaned loot, returned home; state=" + npc.brain().taskState());
+                    stand(player, level, 53.5, -56, 9.5, 160, 25, true);
+                    capture = 8; stage = 21; ticks = 0;
+                }
+                case 21 -> {
+                    if (captured != 8) return;
                     stage = 8; ticks = 0;
                 }
                 case 8 -> {
@@ -350,7 +399,7 @@ public final class ClientValidation implements ClientModInitializer {
                     npc.setHealth(npc.getMaxHealth());
                     for (int slot = 0; slot < npc.backpack().getContainerSize(); slot++)
                         if (Navigator.BUILDING_BLOCKS.contains(npc.backpack().getItem(slot).getItem())) npc.backpack().setItem(slot, ItemStack.EMPTY);
-                    stand(player, level, 36.5, -57, 2.5, 90, 30, true);
+                    stand(player, level, 53.5, -57, 2.5, 90, 30, true);
                     JevNpcMod.config().autonomyEnabled = true;
                     record("AUTONOMY setup: idle diligent NPC near home with no building blocks; owner nearby; live Jev decides.");
                     stage = 9; ticks = 0;

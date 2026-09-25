@@ -79,6 +79,17 @@ class DeepSeekClientTest {
         assertFalse(reply.hasTask());
     }
 
+    @Test void amendmentReferencesRoundTripAndRejectMalformedIndices() {
+        String json = planJson().replace("\"amount\":12", "\"amount\":8,\"from_stage\":0");
+        var reply = DeepSeekClient.parse(completion("{\"reply\":\"总共八块\",\"goal_change\":\"amend\",\"plan\":" + json + "}"), 5);
+        assertEquals(0, reply.plan().stages().getFirst().fromStage());
+        assertEquals(reply.plan(), GoalPlan.parse(reply.plan().json()));
+        for (String index : List.of("-1", "8", "0.5", "\"0\"")) {
+            String invalid = json.replace("\"from_stage\":0", "\"from_stage\":" + index);
+            assertThrows(JevClient.JevFailure.class, () -> DeepSeekClient.parse(completion("{\"goal_change\":\"amend\",\"plan\":" + invalid + "}"), 5));
+        }
+    }
+
     @Test void inventedToolsOrParametersCannotBecomeExecutablePlans() {
         for (String invalid : List.of(planJson().replace("stone", "diamond"), planJson().replace("mine", "teleport"),
             planJson().replace(":12", ":-2"), planJson().replace(":12", ":12.5"), planJson().replace(":12", ":257"))) {

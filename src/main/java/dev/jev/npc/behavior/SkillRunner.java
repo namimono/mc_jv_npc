@@ -48,6 +48,13 @@ public final class SkillRunner {
     private String lastOutcome = "idle";
     private long emergencyUntil;
     private long lastSpeechTick = -200;
+    private boolean dialoguePaused;
+
+    /** Jev may freeze a step while interpreting a changed request, without discarding its progress. */
+    public void pauseForDialogue(boolean paused) {
+        if (paused && !dialoguePaused) { clearCracks(); navigator.stop(); }
+        dialoguePaused = paused;
+    }
 
     private static final class Task {
         final ActionPlan plan;
@@ -149,12 +156,24 @@ public final class SkillRunner {
     }
 
     public void stop() {
+        dialoguePaused = false;
         clearCracks();
         active = null;
         suspended = null;
         emergencyUntil = 0;
         navigator.stop();
         lastOutcome = "cancelled by owner";
+    }
+
+    /** Work already performed by a step that has not yet reported completion (including suspended work). */
+    public int unfinishedGathered(String stepId) {
+        for (Task candidate : new Task[] { active, suspended }) {
+            for (Task cursor = candidate; cursor != null; cursor = cursor.parent) {
+                if (cursor.plan.id().equals(stepId) && (cursor.plan.skill() == Skill.MINE || cursor.plan.skill() == Skill.HARVEST))
+                    return cursor.progress;
+            }
+        }
+        return 0;
     }
 
     public void resume() {
@@ -181,6 +200,7 @@ public final class SkillRunner {
 
     public void tick() {
         if ((npc.isOnFire() || npc.isInLava()) && !emergencyLocked()) emergencyRetreat();
+        if (dialoguePaused && !emergencyLocked()) return;
         if (npc.tickCount % 10 == 0) pickUpNearbyItems();
         if (active == null) {
             lookAtOwner();
@@ -578,7 +598,7 @@ public final class SkillRunner {
             }
             if (remaining > 0) missing = true;
         }
-        finish(!missing, missing ? "部分采集物已不在背包中，无法全部交付" : "已把本次采集的物品交给你");
+        finish(!missing, missing ? "部分采集物已不在背包中，无法全部交付" : "已按当前目标交付物品");
     }
 
     private void build() {
@@ -747,6 +767,7 @@ public final class SkillRunner {
     }
 
     public void load(CompoundTag tag) {
+        dialoguePaused = false;
         try {
             active = tag.contains("active") ? Task.load(tag.getCompound("active")) : null;
             suspended = tag.contains("suspended") ? Task.load(tag.getCompound("suspended")) : null;

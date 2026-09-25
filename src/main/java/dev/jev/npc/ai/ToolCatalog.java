@@ -53,6 +53,8 @@ public final class ToolCatalog {
     public static JsonObject forPlan(GoalPlan plan) {
         JsonObject result = new JsonObject();
         plan.stages().forEach(stage -> result.addProperty(stage.method().verb(), METHODS.get(stage.method().verb())));
+        result.addProperty("eat", METHODS.get("eat") + " 可按约束在其他阶段执行期间即时使用，无需单列主阶段。");
+        result.addProperty("equip", METHODS.get("equip") + " 可按约束在其他阶段执行期间即时使用，无需单列主阶段。");
         return result;
     }
     private ToolCatalog() {}

@@ -87,6 +87,8 @@ cd /Users/nakami/Documents/code/mc_jv_npc
 
 **聊天。** DeepSeek 只有 `understand_player`（理解玩家、提出计划）与 `compose_speech`（表达 Jev 已确定的事实／问题）两种入口。发言模式在解析器和状态机中都禁止修改任务或授权。普通执行结果、恢复和空闲不会调用 DeepSeek 做行动规划。日志记录每次语言调用的消息 ID、模式和目的，及 Jev 路由／审查结果。玩家消息处理失败时明确提示重试；没有 DeepSeek 时无法完成需要它的语言理解，不伪造任务。手动 `/jev do`、即时避险及工具执行的固定状态回执仍由本地代码输出；这些回执不是生成式对话。
 
+**中途修订。** 玩家可以修改正在执行的目标。Jev 可先选择暂缓动作再委派理解，普通聊天可继续边做边聊。采用 `amend` 后保留任务身份、继续阶段的进度、交付账本、权限及预算；数量表示修改后的累计总数，包括尚未结束步骤中已经采到的物品。比如已采七块时把十二块改为总共八块，只需再采一块。如果确认时已经超采，只交付新目标尚欠数量，余料留在背包；已交出的物品无法撤回。阶段引用不明确的修订会被拒绝并保留原任务；`replace` 则表示开始新目标。
+
 对话包含最近八条已采用的玩家交流消息、最近实际发言、待授权问题和目标状态。提案只有被 Jev 采用或实际发送才写入历史。
 
 | 指令 | 用途 |
@@ -118,4 +120,4 @@ JUnit 使用本地 HTTP 测试服务器，检查 Jev 与 DeepSeek 的真实请�
 
 配置中 `allowBlockChanges=false` 可关闭砍树／挖掘／建造，寻路也随之不再挖掘或放置。寻路相关：`navAllowBreak`、`navAllowPlace`（默认都开）、`navMaxFall`（默认 3）、`navMaxNodes` 与 `navNodesPerTick`（单次搜索与每 tick 的节点预算，默认 6000 与 1500）。提问等待 `questionTimeoutTicks`（默认 1200，即 60 秒）。自主行为：`autonomyEnabled`、`autonomyIdleTicks`（空闲评估间隔，默认 200）、`autonomyMayModifyWorld`、`autonomyHomeRadius`（默认 24）。DeepSeek：`llmEnabled`、`llmModel`（默认 `deepseek-flash`，也可填 `deepseek-v4-pro`）、`llmTimeoutMs`（默认 20000）、`llmMaxRequestsPerMinute`（全服默认 20）。`debugToOwner` 是兼容旧配置的字段，决策诊断现在始终仅写日志。默认请求超时 2.5 秒、同一 NPC 决策冷却 2 秒、事件合并 0.4 秒、低频检查 30 秒、全服务器每分钟最多 60 次请求。Jev 的 Choice 置信度来自候选概率分布，并不是动作正确性的保证。
 
-**真实客户端与官网 API 验收。** 配置好 key 后运行 `./scripts/dev.sh runClientValidation`。该任务会调用真实 Jev 与 DeepSeek，在 `build/client-validation/` 下建立新世界，检查闲聊不启动任务、缺方块先挖再搭桥、挖木板墙前提问、追问保留授权问题、关闭 Jev 时不绕过门控调用 DeepSeek、聊天同意后挖穿、持续跟随时异步对话、十二块圆石交付后回家的复合目标、自主补充方块与黄昏事件处理（可选择不发言），保存 `result.txt` 和七张游戏截图后关闭客户端。密钥优先取 `run/config/jev-npc.secret.json`，不存在时取仓库 `config/` 下的密钥；环境变量仍具有最高优先级。验收模组独立于发布 JAR。结果与本机 Gradle 下载问题的复跑方法见 [客户端验收记录](docs/client-validation.md)。
+**真实客户端与官网 API 验收。** 配置好 key 后运行 `./scripts/dev.sh runClientValidation`。该任务会调用真实 Jev 与 DeepSeek，在 `build/client-validation/` 下建立新世界，检查闲聊不启动任务、缺方块先挖再搭桥、挖木板墙前提问、追问保留授权问题、关闭 Jev 时不绕过门控调用 DeepSeek、聊天同意后挖穿、持续跟随时异步对话、十二块圆石交付后回家的复合目标、采集中用聊天将十二块修订为总共八块、自主补充方块与黄昏事件处理（可选择不发言），保存 `result.txt` 和八张游戏截图后关闭客户端。密钥优先取 `run/config/jev-npc.secret.json`，不存在时取仓库 `config/` 下的密钥；环境变量仍具有最高优先级。验收模组独立于发布 JAR。结果与本机 Gradle 下载问题的复跑方法见 [客户端验收记录](docs/client-validation.md)。
