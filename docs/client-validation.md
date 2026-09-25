@@ -1,4 +1,40 @@
-# 分层 Agent 客户端验收 · 2026-09-25
+# DeepSeek 对话收尾验收 · 2026-09-25 13:26
+
+结论：PASS。真实 `deepseek-flash` 与官网 Jev 在隔离客户端完成对话、任务和授权流程；新增单测与 GameTest 均通过。此前提交 `ac06a0a` 已完成四段场景，本轮补足交接中提出的上下文和无 Jev 路径缺口。
+
+| 输入／场景 | 可失败断言与实际结果 |
+| --- | --- |
+| 普通聊天 `@小杰 你好，今天心情怎么样？` | 客户端正常聊天管线发送，`ClientReceiveMessageEvents` 收到自然语言“挺好的，刚闲着呢。有啥要我干的活吗？”；收到回复和截图等待期间没有目标或技能启动 |
+| “走到我现在站的位置” | DeepSeek 返回 go_to/owner，任务文本采用复述“走到主人现在的位置”；日志中的 owner message 已有 GoalIntent，省去 Jev 解释轮。随后 Jev 选工具、先挖五块泥土、搭三格桥、到达对岸；两轮完成 |
+| 木板房内要求走到主人身边，然后追问“为什么要挖墙？” | Jev 分类后的非答复进入 DeepSeek，回复解释直线路线穿过两个方块；原问题对象和目标 ID 不变、未获授权、墙体完整 |
+| 暂时关闭 Jev，继续问“挖墙会弄坏房子吗？” | DeepSeek 仍能结合问题和刚才发言解释会留下洞；原问题与目标仍保留，未授权或破坏方块 |
+| 恢复 Jev，普通聊天“可以，挖吧” | 关键词授权 break_built；挖掉两块木板，从房子走到主人身边并完成，木板剩 32 块 |
+| 空闲且没有垫脚方块 | 真实 Jev 选择 stock_blocks，200 tick 内采到四块；拨到黄昏后客户端收到天黑提醒 |
+
+五次 DeepSeek 调用均返回可解析 JSON，延迟分别为 1709、1469、1207、1160、1274 ms。本轮沿用生产客户端的 JSON Output 和 `thinking.type=disabled` 请求，完成了实际密钥、模型名和接口冒烟验证。这是少量实际样本，不是准确率或延迟分布统计。
+
+**代码回归覆盖。** 66 项 JUnit 全通过：新增任务复述优先、任务／闲聊 JSON 历史、实际发言缓冲及去重检查。31 项 GameTest 全通过：新增无模型时已知意图采集并交付、请求攻击铁傀儡时拒绝猜测且附近村民和铁傀儡均不受伤。有／无 Jev 的追问路由及问题保留由本轮真实客户端断言覆盖。发布 JAR 不包含 ClientValidation 或 NpcGameTests。
+
+**画面检查。** 已查看 stage-2、stage-4、stage-5、stage-6：泥土桥连接两岛且 NPC 已过桥；黄昏能看到胸甲、挖出的门洞与天黑提醒；闲聊文本与 NPC 同屏；两轮追问及解释在聊天 HUD 中清晰可读，墙体尚未破坏。stage-1、stage-3 也由运行任务生成并检查文件存在。
+
+第一轮扩展验收因措辞断言过窄失败：回复用“屋里”“方块”解释路线，断言只接受“墙／木板／房”。补充同义表达后重跑通过；目标、问题、授权和墙体完整性断言始终保留。
+
+证据（由下次运行覆盖）：`build/client-validation/result.txt`、`build/client-validation/logs/latest.log`、`build/handoff-client-validation.log`、`build/handoff-verification.log`，以及 `build/client-validation/screenshots/stage-1.png` 至 `stage-6.png`。测试客户端已自动退出。
+
+```bash
+./scripts/dev.sh test build runGameTest --console=plain
+./scripts/dev.sh runClientValidation --console=plain
+```
+
+每阶段最多 2600 服务端 tick、全局最多 480 秒；Gradle 删除旧结果和六张旧截图，缺文件、FAIL 或超时均导致任务失败。密钥保持在忽略文件中，未写入文档或提交。
+
+**未覆盖范围。** 多人并发对话、长时间生存、所有中文表达和延迟响应竞态未做真实客户端压力验收；其他主动提醒仍沿用此前的覆盖边界。对话记忆和最近发言仅保留在内存中，不跨存档恢复。
+
+以下保留历史记录，旧证据路径已由本轮运行覆盖。
+
+---
+
+# 分层 Agent 首轮客户端验收 · 2026-09-25 12:48
 
 最新隔离客户端验收为 PASS，全程使用真实官网 Jev 和真实 DeepSeek（`deepseek-flash`），没有模拟模型结果。场景改为本次改动的触发路径；上一轮的砍树、入水、挖地面场景由 GameTest 继续覆盖。
 

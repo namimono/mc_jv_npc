@@ -90,11 +90,11 @@ tasks.named('runClientValidation') {
             java.nio.file.Files.setPosixFilePermissions(target.toPath(), java.nio.file.attribute.PosixFilePermissions.fromString('rw-------'))
         }
         file('build/client-validation/result.txt').delete()
-        (1..4).each { file("build/client-validation/screenshots/stage-${it}.png").delete() }
+        (1..6).each { file("build/client-validation/screenshots/stage-${it}.png").delete() }
     }
     doLast {
         def result = file('build/client-validation/result.txt')
-        def framesPresent = (1..4).every { file("build/client-validation/screenshots/stage-${it}.png").length() > 0 }
+        def framesPresent = (1..6).every { file("build/client-validation/screenshots/stage-${it}.png").length() > 0 }
         if (!result.exists() || !result.text.startsWith('PASS\n') || !framesPresent) {
             throw new GradleException('Client acceptance failed; inspect build/client-validation/result.txt and logs/latest.log')
         }

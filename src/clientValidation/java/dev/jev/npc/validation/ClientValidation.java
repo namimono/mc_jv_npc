@@ -1,6 +1,7 @@
 package dev.jev.npc.validation;
 
 import dev.jev.npc.JevNpcMod;
+import dev.jev.npc.ai.Communicator;
 import dev.jev.npc.command.NpcCommands;
 import dev.jev.npc.entity.JevNpcEntity;
 import dev.jev.npc.navigation.Navigator;
@@ -48,6 +49,10 @@ public final class ClientValidation implements ClientModInitializer {
     private int stage, ticks, settled;
     private volatile int entityId = -1, capture, captured;
     private volatile String failure;
+    private volatile String outboundChat;
+    private int chatBaseline;
+    private Communicator.Question pendingQuestion;
+    private String pendingGoal;
     private JevNpcEntity npc;
 
     @Override public void onInitializeClient() {
@@ -76,7 +81,12 @@ public final class ClientValidation implements ClientModInitializer {
             }
             if (client.level == null || client.player == null) return;
             if (!(client.level.getEntity(entityId) instanceof JevNpcEntity)) return;
-            if (captured == 3 && !replied) {
+            if (outboundChat != null) {
+                String message = outboundChat;
+                outboundChat = null;
+                client.player.connection.sendChat(message);
+            }
+            if (captured == 6 && !replied) {
                 // The owner answers like a player would: plain chat, no @ prefix, through the real chat pipeline.
                 client.player.connection.sendChat("可以，挖吧");
                 replied = true;
@@ -89,7 +99,7 @@ public final class ClientValidation implements ClientModInitializer {
             Screenshot.grab(client.gameDirectory, "stage-" + capture + ".png", client.getMainRenderTarget(), message -> {});
             captured = capture;
             settled = 0;
-            if (capture == 4) finish(client, true, "Client received the permission question and the nightfall remark; four rendered frames captured.");
+            if (capture == 4) finish(client, true, "Client received idle chat, two contextual explanations, the permission question and the nightfall remark; six rendered frames captured.");
         } catch (Throwable error) { finish(client, false, error.getClass().getSimpleName() + ": " + error.getMessage()); }
     }
 
@@ -98,6 +108,19 @@ public final class ClientValidation implements ClientModInitializer {
     }
     private void record(String text) { evidence.append(text).append('\n'); JevNpcMod.LOGGER.info("CLIENT_VALIDATION {}", text); }
     private void require(boolean condition, String message) { if (!condition) throw new IllegalStateException(message); }
+    private void chat(String message) {
+        chatBaseline = received.size();
+        outboundChat = message;
+    }
+    private String latestReply() {
+        return received.stream().skip(chatBaseline).filter(text -> text.startsWith("<小杰> ")).findFirst().orElse(null);
+    }
+    private void questionUnchanged(ServerLevel level) {
+        require(npc.speech().pending().orElse(null) == pendingQuestion, "A clarification must keep the pending question");
+        require(npc.brain().hasGoal() && npc.brain().taskState().get("id").getAsString().equals(pendingGoal), "A clarification must not replace the goal");
+        require(npc.brain().grants().isEmpty(), "A clarification must not grant permission");
+        require(level.getBlockState(new BlockPos(21, -60, 0)).is(Blocks.OAK_PLANKS), "Clarification must not break the wall");
+    }
     /** With DeepSeek configured, a goal starts only after the conversation reply arrives. */
     private boolean completed() {
         if (!goalStarted) {
@@ -132,6 +155,7 @@ public final class ClientValidation implements ClientModInitializer {
                 case 0 -> {
                     if (ticks < 40) return;
                     require(!JevNpcMod.config().effectiveKey().isBlank(), "NO_KEY in isolated instance");
+                    require(JevNpcMod.config().llmReady(), "DeepSeek must be enabled with a real key");
                     JevNpcMod.config().autonomyEnabled = false;
                     level.setDayTime(6000);
                     level.setWeatherParameters(0, 100000, false, false);
@@ -153,6 +177,20 @@ public final class ClientValidation implements ClientModInitializer {
                 case 1 -> {
                     if (captured != 1) return;
                     stand(player, level, 5.5, -50, 2.5, 90, 25, false);
+                    chat("@小杰 你好，今天心情怎么样？");
+                    stage = 11; ticks = 0;
+                }
+                case 11 -> {
+                    require(!npc.brain().hasGoal(), "Idle chat must not create a goal");
+                    String reply = latestReply();
+                    if (reply == null) return;
+                    require(!npc.skills().hasTask(), "Idle chat must not start an action");
+                    record("DEEPSEEK CHAT: " + reply + "; no goal or action started.");
+                    capture = 5; stage = 12; ticks = 0;
+                }
+                case 12 -> {
+                    require(!npc.brain().hasGoal(), "Chat must remain task-free after rendering");
+                    if (captured != 5) return;
                     stage = 2; ticks = 0;
                 }
                 case 2 -> {
@@ -197,9 +235,37 @@ public final class ClientValidation implements ClientModInitializer {
                     require(question.get().kind().equals("break_built"), "Expected a break_built question: " + question.get());
                     require(level.getBlockState(new BlockPos(21, -60, 0)).is(Blocks.OAK_PLANKS), "Nothing may be broken before the owner answers");
                     record("QUESTION: " + question.get().prompt());
+                    pendingQuestion = question.get();
+                    pendingGoal = npc.brain().taskState().get("id").getAsString();
+                    goalStarted = true;
                     capture = 3; stage = 7; ticks = 0;
                 }
                 case 7 -> {
+                    questionUnchanged(level);
+                    if (captured != 3) return;
+                    chat("为什么要挖墙？");
+                    stage = 13; ticks = 0;
+                }
+                case 13 -> {
+                    questionUnchanged(level);
+                    String reply = latestReply();
+                    if (reply == null) return;
+                    require(List.of("墙", "木板", "房", "屋", "方块", "出口").stream().anyMatch(reply::contains),
+                        "Explanation must refer to the pending route: " + reply);
+                    record("QUESTION CHAT with Jev: " + reply + "; same goal and question, no grant.");
+                    JevNpcMod.config().enabled = false;
+                    chat("挖墙会弄坏房子吗？");
+                    stage = 14; ticks = 0;
+                }
+                case 14 -> {
+                    questionUnchanged(level);
+                    String reply = latestReply();
+                    if (reply == null) return;
+                    record("QUESTION CHAT without Jev: " + reply + "; same goal and question, no grant.");
+                    JevNpcMod.config().enabled = true;
+                    capture = 6; stage = 15; ticks = 0;
+                }
+                case 15 -> {
                     if (!completed()) return;
                     require(npc.brain().taskState().get("owner_grants").toString().contains("break_built"), "The chat reply must grant permission");
                     int planks = 0;
